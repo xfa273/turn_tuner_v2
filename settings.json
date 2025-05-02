@@ -9,10 +9,10 @@
     },
     "current_selection": {
         "robot_size": "クラシック",
-        "turn_type": "135deg入り"
+        "turn_type": "大回り90deg"
     },
     "parameters": {
         "velocity": 1000.0,
-        "front_offset": 30.0
+        "front_offset": 10.0
     }
 }
