@@ -1,0 +1,17 @@
+# Python関連
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
+ENV/
+
+# 一時ファイル
+*.tmp
+*.bak
+.DS_Store
+
+# 個人設定ファイル（必要に応じて）
+# settings.json

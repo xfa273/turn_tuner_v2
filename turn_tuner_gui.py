@@ -1,0 +1,1090 @@
+#!/usr/bin/env python3
+import math
+import sys
+import os
+import json
+import numpy as np
+import tkinter as tk
+from tkinter import ttk
+import tkinter.messagebox
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import matplotlib
+
+# 日本語フォントの設定
+matplotlib.rcParams['font.family'] = 'MS Gothic'  # Windows用日本語フォント
+matplotlib.rcParams['font.sans-serif'] = ['MS Gothic']
+matplotlib.rcParams['axes.unicode_minus'] = False  # マイナス記号の文字化け防止
+from functools import partial
+import multiprocessing as mp
+import config  # config.py を参照
+import turn_params  # ターン用パラメータ
+
+# グローバル変数（描画スケール）
+SCALE_FACTOR = 1  # 1: ハーフサイズ, 2: クラシックサイズ（後でメイン処理で設定）
+
+# ==========================
+# ＜パラメータ探索用シミュレーション関数群＞
+# ==========================
+
+def integrate_phase(phi_func, t_phase, v, dt):
+    """位相ごとの数値積分"""
+    x = 0.0
+    y = 0.0
+    t = 0.0
+    n_steps = int(t_phase / dt)
+    remainder = t_phase - n_steps * dt
+
+    for i in range(n_steps):
+        t_mid = t + dt/2
+        phi = phi_func(t_mid)
+        x += v * math.cos(phi) * dt
+        y += v * math.sin(phi) * dt
+        t += dt
+
+    if remainder > 1e-12:
+        t_mid = t + remainder/2
+        phi = phi_func(t_mid)
+        x += v * math.cos(phi) * remainder
+        y += v * math.sin(phi) * remainder
+        t += remainder
+
+    phi_final = phi_func(t_phase)
+    return x, y, phi_final
+
+def simulate_turn(turning_angle_deg, translational_velocity, angular_acceleration_deg, rear_offset_distance, dt, slip_coefficient=1.0):
+    """ターン動作のシミュレーション
+    Parameters:
+        turning_angle_deg: 旋回角度 [deg]
+        translational_velocity: 並進速度 [mm/s]
+        angular_acceleration_deg: 角加速度 [deg/s^2]
+        rear_offset_distance: 後オフセット距離 [mm]
+        dt: 時間ステップ [s]
+        slip_coefficient: スリップアングル係数 (1.0=スリップなし)
+    """
+    theta_tot = turning_angle_deg * math.pi / 180.0
+    # スリップアングル係数を角加速度に適用
+    alpha_mag = angular_acceleration_deg * math.pi / 180.0 * slip_coefficient
+    phi0 = math.pi/2  # 初期進行角（北向き）
+
+    # 旋回角を３等分（「入り」設定）
+    theta1 = theta_tot / 3.0
+    theta2 = theta_tot / 3.0
+
+    # フェーズ2：クロソイド入り（加速）
+    t1 = math.sqrt(2 * theta1 / alpha_mag)
+    def phi_phase2(t):
+        return phi0 - 0.5 * alpha_mag * t * t
+    x2, y2, _ = integrate_phase(phi_phase2, t1, translational_velocity, dt)
+    phi1 = phi0 - theta1
+
+    # フェーズ3：円弧区間（定角速度）
+    w1 = -alpha_mag * t1  # フェーズ2終了時の角速度
+    t2 = theta2 / abs(w1)
+    def phi_phase3(t):
+        return phi1 + w1 * t
+    x3, y3, _ = integrate_phase(phi_phase3, t2, translational_velocity, dt)
+    phi2 = phi1 + w1 * t2
+
+    # フェーズ4：クロソイド出口（減速）
+    t3 = t1
+    def phi_phase4(t):
+        return phi2 + w1 * t + 0.5 * alpha_mag * t * t
+    x4, y4, phi_phase4_end = integrate_phase(phi_phase4, t3, translational_velocity, dt)
+    phi_final = phi_phase4_end
+
+    # フェーズ5：後オフセット直進
+    x5 = rear_offset_distance * math.cos(phi_final)
+    y5 = rear_offset_distance * math.sin(phi_final)
+
+    x_turn = x2 + x3 + x4 + x5
+    y_turn = y2 + y3 + y4 + y5
+
+    return x_turn, y_turn, phi_final
+
+def simulate_full_trajectory(turning_angle_deg, translational_velocity, angular_acceleration_deg,
+                             front_offset_distance, rear_offset_distance, dt, slip_coefficient=1.0):
+    """全体の軌道シミュレーション（前オフセット＋ターン＋後オフセット）
+    Parameters:
+        turning_angle_deg: 旋回角度 [deg]
+        translational_velocity: 並進速度 [mm/s]
+        angular_acceleration_deg: 角加速度 [deg/s^2]
+        front_offset_distance: 前オフセット距離 [mm]
+        rear_offset_distance: 後オフセット距離 [mm]
+        dt: 時間ステップ [s]
+        slip_coefficient: スリップアングル係数 (1.0=スリップなし)
+    """
+    x_turn, y_turn, phi_final = simulate_turn(turning_angle_deg, translational_velocity,
+                                              angular_acceleration_deg, rear_offset_distance, dt, slip_coefficient)
+    phi0 = math.pi/2
+    x_pre = front_offset_distance * math.cos(phi0)
+    y_pre = front_offset_distance * math.sin(phi0)
+    x_total = x_pre + x_turn
+    y_total = y_pre + y_turn
+    return x_total, y_total, phi_final
+
+def compute_max_angular_velocity(turning_angle_deg, angular_acceleration_deg):
+    """最大角速度の計算"""
+    theta_tot = turning_angle_deg * math.pi / 180.0
+    theta1 = theta_tot / 3.0
+    alpha_mag = angular_acceleration_deg * math.pi / 180.0
+    max_w_rad = math.sqrt(2 * theta1 * alpha_mag)
+    max_w_deg = max_w_rad * 180 / math.pi
+    return max_w_rad, max_w_deg
+
+def is_diagonal_turn(turn_type):
+    """斜め入りのターンかどうかを判定する関数"""
+    return "45deg入り" in turn_type or "135deg入り" in turn_type
+
+def compute_error(angular_acceleration_deg, rear_offset_distance, target_x, target_y,
+                  turning_angle_deg, translational_velocity, front_offset_distance, dt, slip_coefficient=1.0):
+    """目標位置との誤差計算"""
+    x_end, y_end, phi_final = simulate_full_trajectory(turning_angle_deg, translational_velocity,
+                                                       angular_acceleration_deg, front_offset_distance,
+                                                       rear_offset_distance, dt, slip_coefficient)
+    # 目標位置との二乗誤差
+    error = (x_end - target_x)**2 + (y_end - target_y)**2
+    return error, x_end, y_end, phi_final
+
+def evaluate_candidate(args):
+    """探索候補の評価"""
+    angular_acceleration_deg, rear_offset, target_x, target_y, turning_angle_deg, translational_velocity, front_offset_distance, dt = args
+    error, x_end, y_end, phi_final = compute_error(angular_acceleration_deg, rear_offset, target_x, target_y,
+                                                   turning_angle_deg, translational_velocity, front_offset_distance, dt)
+    return error, angular_acceleration_deg, rear_offset, x_end, y_end, phi_final
+
+def search_parameters_parallel(target_x, target_y, turning_angle_deg, translational_velocity, front_offset_distance, dt,
+                               min_acc_deg, max_acc_deg, acc_step,
+                               min_rear_offset, max_rear_offset, rear_offset_step):
+    """パラメータの並列探索"""
+    candidates = []
+    
+    # 探索対象のパラメータ組み合わせを作成
+    for angular_acceleration_deg in np.arange(min_acc_deg, max_acc_deg + acc_step, acc_step):
+        for rear_offset in np.arange(min_rear_offset, max_rear_offset + rear_offset_step, rear_offset_step):
+            candidates.append((angular_acceleration_deg, rear_offset, target_x, target_y, turning_angle_deg, translational_velocity, front_offset_distance, dt))
+
+    # マルチプロセスによる並列計算
+    with mp.Pool() as pool:
+        results = pool.map(evaluate_candidate, candidates)
+
+    # 誤差最小のパラメータを選択
+    best_result = None
+    min_error = float('inf')
+
+    for result in results:
+        error, angular_acceleration_deg, rear_offset, x_end, y_end, phi_final = result
+        if error < min_error:
+            min_error = error
+            best_result = (angular_acceleration_deg, rear_offset, x_end, y_end, phi_final)
+
+    return best_result
+
+# ==========================
+# ＜GUIアプリケーションクラス＞
+# ==========================
+
+class TurnTunerApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("ターンシミュレーター v2")
+        
+        # 設定ファイルのパス
+        self.settings_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+        
+        # 設定ファイルから設定を読み込む
+        self.settings = self.load_settings()
+        
+        # ロボットサイズ設定を取得
+        self.robot_settings = self.settings["robot_settings"]
+        
+        # 前回の選択状態を取得
+        self.robot_size = self.settings["current_selection"]["robot_size"]
+        self.turn_type = self.settings["current_selection"]["turn_type"]
+        
+        # turn_paramsモジュールを正しく参照
+        import turn_params as tp  # エラー回避のために再度インポート
+        self.scale_factor = tp.ROBOT_SIZES[self.robot_size]["scale"]
+        
+        # ロボットの幅を設定から読み込み
+        if self.robot_size in self.robot_settings:
+            self.robot_width = self.robot_settings[self.robot_size]["width"]
+        else:
+            # 設定になければデフォルト値を使用
+            self.robot_width = tp.ROBOT_SIZES[self.robot_size]["width"]
+            # 設定に追加
+            self.robot_settings[self.robot_size] = {"width": self.robot_width}
+            self.save_settings()
+        
+        # 元のグローバル変数をクラスのメンバ変数として再定義
+        self.ini_x = 0.0
+        self.ini_y = 45.0 * self.scale_factor  # ハーフサイズの場合は45, クラシックの場合は90
+        self.ini_angle = 0.0
+        self.fin_angle = 90.0  # 初期値、load_turn_paramsで上書きされる
+        
+        # 動作パラメータの初期化（デフォルト設定）
+        self.load_turn_params()
+        
+        # GUI作成
+        self.create_gui()
+        
+        # 初期表示のみ行い、自動軸道計算は行わない
+        self.root.after(100, self.initialize_plot)
+        
+    def load_settings(self):
+        """設定ファイルから設定を読み込む"""
+        try:
+            if os.path.exists(self.settings_file):
+                with open(self.settings_file, 'r', encoding='utf-8') as f:
+                    settings_data = json.load(f)
+                    
+                    # 当初フォーマットの場合は新フォーマットに変換
+                    if isinstance(settings_data, dict) and "robot_settings" not in settings_data:
+                        # 旧形式（ロボットサイズの設定のみ）
+                        return {
+                            "robot_settings": settings_data,
+                            "current_selection": {
+                                "robot_size": "ハーフ",
+                                "turn_type": "小回り90deg"
+                            },
+                            "parameters": {
+                                "velocity": 250,
+                                "front_offset": 10
+                            }
+                        }
+                    return settings_data
+            else:
+                # 新規作成時のデフォルト設定
+                return {
+                    "robot_settings": {
+                        "ハーフ": {"width": 36.0},
+                        "クラシック": {"width": 70.0}
+                    },
+                    "current_selection": {
+                        "robot_size": "ハーフ",
+                        "turn_type": "小回り90deg"
+                    },
+                    "parameters": {
+                        "velocity": 250,
+                        "front_offset": 10
+                    }
+                }
+        except Exception as e:
+            print(f"設定読み込みエラー: {e}")
+            # エラー時のデフォルト設定
+            return {
+                "robot_settings": {
+                    "ハーフ": {"width": 36.0},
+                    "クラシック": {"width": 70.0}
+                },
+                "current_selection": {
+                    "robot_size": "ハーフ",
+                    "turn_type": "小回り90deg"
+                },
+                "parameters": {
+                    "velocity": 250,
+                    "front_offset": 10
+                }
+            }
+    
+    def save_settings(self):
+        """設定をファイルに保存する"""
+        try:
+            # 全体設定データの作成
+            settings_data = {
+                # ロボットサイズに関する設定
+                "robot_settings": self.robot_settings,
+                
+                # 現在の選択状態
+                "current_selection": {
+                    "robot_size": self.robot_size,
+                    "turn_type": self.turn_type
+                },
+                
+                # 現在の入力値
+                "parameters": {
+                    "velocity": self.translational_velocity,
+                    "front_offset": self.display_front_offset
+                }
+            }
+            
+            # 設定ファイルに保存
+            with open(self.settings_file, 'w', encoding='utf-8') as f:
+                json.dump(settings_data, f, ensure_ascii=False, indent=4)
+                
+        except Exception as e:
+            print(f"設定保存エラー: {e}")
+            tkinter.messagebox.showerror("設定保存エラー", f"設定の保存中にエラーが発生しました: {e}")
+    
+    def update_robot_width(self):
+        """機体の幅を更新して保存する"""
+        try:
+            new_width = float(self.width_entry.get())
+            if new_width <= 0:
+                tkinter.messagebox.showerror("エラー", "機体の幅は正の値でなければなりません")
+                # 元の値に戻す
+                self.width_entry.delete(0, tk.END)
+                self.width_entry.insert(0, str(self.robot_width))
+                return
+                
+            # 幅を更新
+            self.robot_width = new_width
+            
+            # 設定に保存
+            if self.robot_size not in self.robot_settings:
+                self.robot_settings[self.robot_size] = {}
+            self.robot_settings[self.robot_size]["width"] = new_width
+            self.save_settings()
+            
+            # 軸道再計算
+            self.generate_trajectory()
+            
+            tkinter.messagebox.showinfo("設定更新", "機体の幅を更新しました")
+            
+        except ValueError:
+            tkinter.messagebox.showerror("エラー", "機体の幅には数値を入力してください")
+            # 元の値に戻す
+            self.width_entry.delete(0, tk.END)
+            self.width_entry.insert(0, str(self.robot_width))
+        except Exception as e:
+            tkinter.messagebox.showerror("エラー", f"予期せぬエラーが発生しました: {e}")
+            # 元の値に戻す
+            self.width_entry.delete(0, tk.END)
+            self.width_entry.insert(0, str(self.robot_width))
+    
+    def load_turn_params(self):
+        """現在の設定に基づいてターンパラメータを読み込む"""
+        # turn_paramsモジュールへの参照を一貫させる
+        import turn_params as tp
+        
+        turns_dict = tp.HALF_TURNS if self.robot_size == "ハーフ" else tp.CLASSIC_TURNS
+        turn_params_dict = turns_dict[self.turn_type]
+        
+        # パラメータ設定
+        self.turning_angle_deg = turn_params_dict["angle"]
+        self.target_x = turn_params_dict["target_x"]
+        self.target_y = turn_params_dict["target_y"]
+        
+        # 速度は保存された値から読み込み（初回起動時はデフォルト値）
+        if "parameters" in self.settings and "velocity" in self.settings["parameters"]:
+            self.translational_velocity = self.settings["parameters"]["velocity"]
+        else:
+            self.translational_velocity = turn_params_dict["default_velocity"]
+
+        # 前オフセットは保存された値から読み込み（初回起動時はデフォルト値）
+        if "parameters" in self.settings and "front_offset" in self.settings["parameters"]:
+            # 保存された値は常に表示用の値（小回り90degの場合はすでに半区画分引かれている）
+            display_offset = self.settings["parameters"]["front_offset"]
+        else:
+            # 初回起動時はデフォルト値を使用
+            if self.turn_type == "小回り90deg":
+                half_cell = 45.0 if self.robot_size == "ハーフ" else 90.0
+                display_offset = turn_params_dict["default_front_offset"] - half_cell
+            else:
+                display_offset = turn_params_dict["default_front_offset"]
+        
+        # 表示用値を設定
+        self.display_front_offset = display_offset
+        
+        # 小回り90degの場合、計算用には半区画分を加算
+        if self.turn_type == "小回り90deg":
+            half_cell = 45.0 if self.robot_size == "ハーフ" else 90.0
+            self.front_offset_distance = display_offset + half_cell
+        else:
+            # それ以外のターンは表示と計算で同じ値を使用
+            self.front_offset_distance = display_offset
+        
+        # 計算パラメータ
+        self.dt = tp.CALC_PARAMS["dt"]
+        self.min_acc_deg = tp.CALC_PARAMS["min_acc_deg"]
+        self.max_acc_deg = tp.CALC_PARAMS["max_acc_deg"]
+        self.acc_step = tp.CALC_PARAMS["acc_step"]
+        self.min_rear_offset = tp.CALC_PARAMS["min_rear_offset"]
+        self.max_rear_offset = tp.CALC_PARAMS["max_rear_offset"]
+        self.rear_offset_step = tp.CALC_PARAMS["rear_offset_step"]
+        
+        # スリップアングル係数の初期化
+        if "parameters" in self.settings and "slip_coefficient" in self.settings["parameters"]:
+            self.slip_coefficient = self.settings["parameters"]["slip_coefficient"]
+        else:
+            self.slip_coefficient = tp.CALC_PARAMS["default_slip_coefficient"]
+        
+    def create_gui(self):
+        """GUIコンポーネントを作成する"""
+        # メインフレームの作成
+        main_frame = ttk.Frame(self.root, padding=10)
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # 左側フレーム（設定部分）
+        left_frame = ttk.Frame(main_frame, padding=5)
+        left_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # 右側フレーム（グラフ表示部分）
+        right_frame = ttk.Frame(main_frame, padding=5)
+        right_frame.grid(row=0, column=1, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # ===== 左側フレームの内容 =====
+        # turn_paramsモジュールへの参照を一貫させる
+        import turn_params as tp
+        
+        # 機体サイズ選択
+        ttk.Label(left_frame, text="機体サイズ:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.size_combo = ttk.Combobox(left_frame, values=list(tp.ROBOT_SIZES.keys()), width=15, state="readonly")
+        self.size_combo.grid(row=0, column=1, sticky=tk.W, pady=5)
+        self.size_combo.set(self.robot_size)
+        self.size_combo.bind("<<ComboboxSelected>>", self.on_size_changed)
+        
+        # 動作タイプ選択
+        ttk.Label(left_frame, text="動作タイプ:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.turn_combo = ttk.Combobox(left_frame, values=list(tp.HALF_TURNS.keys()), width=15, state="readonly")
+        self.turn_combo.grid(row=1, column=1, sticky=tk.W, pady=5)
+        self.turn_combo.set(self.turn_type)
+        self.turn_combo.bind("<<ComboboxSelected>>", self.on_turn_changed)
+        
+        # 並進速度設定
+        ttk.Label(left_frame, text="並進速度 [mm/s]:").grid(row=2, column=0, sticky=tk.W, pady=5)
+        self.velocity_entry = ttk.Entry(left_frame, width=15)
+        self.velocity_entry.grid(row=2, column=1, sticky=tk.W, pady=5)
+        self.velocity_entry.insert(0, str(self.translational_velocity))
+        
+        # 前オフセット距離設定
+        ttk.Label(left_frame, text="前オフセット [mm]:").grid(row=3, column=0, sticky=tk.W, pady=5)
+        self.front_offset_entry = ttk.Entry(left_frame, width=15)
+        self.front_offset_entry.grid(row=3, column=1, sticky=tk.W, pady=5)
+        # 表示用の値を使用して表示フィールドを初期化
+        self.front_offset_entry.insert(0, str(self.display_front_offset))
+        
+        # 機体幅設定
+        ttk.Label(left_frame, text="機体の幅 [mm]:").grid(row=4, column=0, sticky=tk.W, pady=5)
+        self.width_entry = ttk.Entry(left_frame, width=15)
+        self.width_entry.grid(row=4, column=1, sticky=tk.W, pady=5)
+        self.width_entry.insert(0, str(self.robot_width))
+        
+        # スリップアングル係数設定
+        ttk.Label(left_frame, text="スリップ係数:").grid(row=5, column=0, sticky=tk.W, pady=5)
+        self.slip_entry = ttk.Entry(left_frame, width=15)
+        self.slip_entry.grid(row=5, column=1, sticky=tk.W, pady=5)
+        self.slip_entry.insert(0, str(self.slip_coefficient))
+        
+        # 機体幅更新ボタン
+        self.width_update_btn = ttk.Button(left_frame, text="幅を更新", command=self.update_robot_width)
+        self.width_update_btn.grid(row=6, column=0, columnspan=2, pady=5)
+        
+        # 結果表示ラベル
+        ttk.Label(left_frame, text="--- 計算結果 ---").grid(row=7, column=0, columnspan=2, sticky=tk.W, pady=10)
+        
+        ttk.Label(left_frame, text="角加速度 [deg/s²]:").grid(row=8, column=0, sticky=tk.W, pady=5)
+        self.acc_label = ttk.Label(left_frame, text="---")
+        self.acc_label.grid(row=8, column=1, sticky=tk.W, pady=5)
+        
+        ttk.Label(left_frame, text="最大角速度 [deg/s]:").grid(row=9, column=0, sticky=tk.W, pady=5)
+        self.ang_vel_label = ttk.Label(left_frame, text="---")
+        self.ang_vel_label.grid(row=9, column=1, sticky=tk.W, pady=5)
+        
+        ttk.Label(left_frame, text="後オフセット [mm]:").grid(row=10, column=0, sticky=tk.W, pady=5)
+        self.rear_offset_label = ttk.Label(left_frame, text="---")
+        self.rear_offset_label.grid(row=10, column=1, sticky=tk.W, pady=5)
+        
+        ttk.Label(left_frame, text="所要時間 [ms]:").grid(row=11, column=0, sticky=tk.W, pady=5)
+        self.time_label = ttk.Label(left_frame, text="---")
+        self.time_label.grid(row=11, column=1, sticky=tk.W, pady=5)
+        
+        # 図の説明
+        ttk.Label(left_frame, text="--- シミュレーション表示 ---").grid(row=12, column=0, columnspan=2, sticky=tk.W, pady=10)
+        ttk.Label(left_frame, text="\u25CF: スタート地点").grid(row=13, column=0, sticky=tk.W)
+        ttk.Label(left_frame, text="\u25A0: ターゲット地点").grid(row=13, column=1, sticky=tk.W)
+        ttk.Label(left_frame, text="赤線: 軸道").grid(row=14, column=0, sticky=tk.W)
+        ttk.Label(left_frame, text="青線: クロソイド入り").grid(row=14, column=1, sticky=tk.W)
+        ttk.Label(left_frame, text="緑線: 定速円弧").grid(row=15, column=0, sticky=tk.W)
+        ttk.Label(left_frame, text="黄線: クロソイド抜け").grid(row=15, column=1, sticky=tk.W)
+        
+        # 計算精度の設定
+        ttk.Label(left_frame, text="計算精度:").grid(row=16, column=0, sticky=tk.W, pady=5)
+        self.precision_frame = ttk.Frame(left_frame)
+        self.precision_frame.grid(row=16, column=1, sticky=tk.W, pady=5)
+        ttk.Label(self.precision_frame, text="高速").pack(side=tk.LEFT, padx=2)
+        self.precision_slider = ttk.Scale(self.precision_frame, from_=0, to=10, orient=tk.HORIZONTAL, length=100)
+        self.precision_slider.pack(side=tk.LEFT, padx=2)
+        ttk.Label(self.precision_frame, text="高精度").pack(side=tk.LEFT, padx=2)
+        
+        # デフォルト値を設定
+        if "precision" in self.settings["parameters"]:
+            self.precision_slider.set(self.settings["parameters"]["precision"])
+        else:
+            # 新規の場合は最高精度をデフォルトに
+            self.precision_slider.set(10)
+        
+        # プログレスバー
+        ttk.Label(left_frame, text="計算進捗:").grid(row=17, column=0, sticky=tk.W, pady=5)
+        self.progress = ttk.Progressbar(left_frame, orient=tk.HORIZONTAL, length=150, mode='determinate')
+        self.progress.grid(row=17, column=1, sticky=tk.W, pady=5)
+        
+        # 計算実行ボタン
+        self.calc_button = ttk.Button(left_frame, text="軸道計算", command=self.generate_trajectory)
+        self.calc_button.grid(row=18, column=0, columnspan=2, pady=20)
+        
+        # ===== 右側フレームの内容 =====
+        # Matplotlib図の作成
+        self.fig, self.ax = plt.subplots(figsize=(7, 7))
+        self.ax.set_aspect('equal')
+        self.ax.grid(True)
+        
+        self.canvas = FigureCanvasTkAgg(self.fig, master=right_frame)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=1)
+        
+    def on_size_changed(self, event):
+        """機体サイズが変更されたときの処理"""
+        # turn_paramsモジュールへの参照を一貫させる
+        import turn_params as tp
+        
+        self.robot_size = self.size_combo.get()
+        self.scale_factor = tp.ROBOT_SIZES[self.robot_size]["scale"]
+        
+        # 設定から機体幅を読み込み
+        if self.robot_size in self.robot_settings:
+            self.robot_width = self.robot_settings[self.robot_size]["width"]
+        else:
+            # 設定になければデフォルト値を使用
+            self.robot_width = tp.ROBOT_SIZES[self.robot_size]["width"]
+            # 設定に追加
+            self.robot_settings[self.robot_size] = {"width": self.robot_width}
+            self.save_settings()
+        
+        # 機体幅の表示を更新
+        self.width_entry.delete(0, tk.END)
+        self.width_entry.insert(0, str(self.robot_width))
+        
+        # サイズ変更に応じてグローバル変数相当の値を更新
+        # ハーフサイズのy初期位置は45mm、クラシックサイズは90mm
+        default_y = 45.0 if self.robot_size == "ハーフ" else 90.0
+        self.ini_y = default_y
+        
+        # 動作タイプのコンボボックス更新
+        turns_dict = tp.HALF_TURNS if self.robot_size == "ハーフ" else tp.CLASSIC_TURNS
+        self.turn_combo['values'] = list(turns_dict.keys())
+        
+        # 前の値が利用可能か確認し、なければ最初の値を設定
+        if self.turn_type not in turns_dict:
+            self.turn_type = list(turns_dict.keys())[0]
+            self.turn_combo.set(self.turn_type)
+        
+        # パラメータ再読み込み
+        self.load_turn_params()
+        
+        # 入力欄の更新
+        self.velocity_entry.delete(0, tk.END)
+        self.velocity_entry.insert(0, str(self.translational_velocity))
+        
+        self.front_offset_entry.delete(0, tk.END)
+        # 小回り90degの場合は表示用の値を使用
+        self.front_offset_entry.insert(0, str(self.display_front_offset))
+    
+    def on_turn_changed(self, event):
+        """動作タイプが変更されたときの処理"""
+        self.turn_type = self.turn_combo.get()
+        
+        # パラメータ再読み込み
+        self.load_turn_params()
+        
+        # 入力欄の更新
+        self.velocity_entry.delete(0, tk.END)
+        self.velocity_entry.insert(0, str(self.translational_velocity))
+        
+        self.front_offset_entry.delete(0, tk.END)
+        # 小回り90degの場合は表示用の値を使用
+        self.front_offset_entry.insert(0, str(self.display_front_offset))
+    
+    def generate_trajectory(self):
+        """軸道計算と描画を実行"""
+        try:
+            # 入力値の取得
+            self.translational_velocity = float(self.velocity_entry.get())
+            
+            # 前オフセット距離の処理
+            # 入力された値は常に表示用の値
+            self.display_front_offset = float(self.front_offset_entry.get())
+            
+            # 小回り90degの場合、計算用には半区画分を加算
+            if self.turn_type == "小回り90deg":
+                half_cell = 45.0 if self.robot_size == "ハーフ" else 90.0
+                self.front_offset_distance = self.display_front_offset + half_cell
+            else:
+                # それ以外のターンは表示用値と計算用値は同じ
+                self.front_offset_distance = self.display_front_offset
+            
+            # スリップアングル係数の取得
+            self.slip_coefficient = float(self.slip_entry.get())
+            
+            # 計算精度の取得
+            precision_value = self.precision_slider.get()
+            
+            # 探索の細かさをスライダーの値から計算
+            # 0 (高速・低精度) から 10 (高精度・低速) のスケール
+            # 角加速度の探索刷み幅を調整 (10がデフォルトの最高精度、低精度では大きく)
+            adjusted_acc_step = self.acc_step * (1 + (10 - precision_value) * 9.9)  # 10～1000 の範囲 (10がデフォルト)
+            
+            # 後オフセット距離の探索刷み幅を調整 (0.1がデフォルトの最高精度、低精度では大きく)
+            adjusted_rear_offset_step = self.rear_offset_step * (1 + (10 - precision_value) * 29.9)  # 0.1～3.0 の範囲
+            
+            # 現在の設定を保存
+            self.settings["current_selection"]["robot_size"] = self.robot_size
+            self.settings["current_selection"]["turn_type"] = self.turn_type
+            self.settings["parameters"]["velocity"] = self.translational_velocity
+            self.settings["parameters"]["front_offset"] = self.display_front_offset
+            self.settings["parameters"]["slip_coefficient"] = self.slip_coefficient
+            self.settings["parameters"]["precision"] = precision_value
+            self.save_settings()
+            
+            # 斜め入りのターンかどうかを判定
+            is_diagonal = is_diagonal_turn(self.turn_type)
+            
+            # 計算ボタンを無効化
+            self.calc_button.config(state=tk.DISABLED)
+            
+            # プログレスバーをリセット
+            self.progress['value'] = 0
+            self.root.update()
+            
+            if is_diagonal:
+                # 斜め入りターンの場合は角加速度と後オフセットの両方を探索
+                best_acc_deg = None
+                best_rear_offset = None
+                best_error = float('inf')
+                
+                # 角加速度と後オフセット距離の候補値を生成
+                acc_candidates = np.arange(self.min_acc_deg, self.max_acc_deg + 1e-10, adjusted_acc_step)
+                rear_offset_candidates = np.arange(self.min_rear_offset, self.max_rear_offset + 1e-10, adjusted_rear_offset_step)
+                
+                # 全探索数を計算
+                total_iterations = len(acc_candidates) * len(rear_offset_candidates)
+                current_iteration = 0
+                
+                # プログレスバーの最大値を設定
+                self.progress['maximum'] = total_iterations
+                
+                for acc_deg in acc_candidates:
+                    for rear_offset in rear_offset_candidates:
+                        # 軸道をシミュレーション
+                        x_end, y_end, phi_final = simulate_full_trajectory(
+                            self.turning_angle_deg, self.translational_velocity,
+                            acc_deg, self.front_offset_distance, rear_offset, self.dt,
+                            self.slip_coefficient
+                        )
+                        
+                        # 目標地点との誤差計算
+                        error = math.sqrt((x_end - self.target_x)**2 + (y_end - self.target_y)**2)
+                        
+                        if error < best_error:
+                            best_error = error
+                            best_acc_deg = acc_deg
+                            best_rear_offset = rear_offset
+                        
+                        # 進捗を更新
+                        current_iteration += 1
+                        self.progress['value'] = current_iteration
+                        
+                        # 10回に1回表示更新
+                        if current_iteration % 10 == 0:
+                            self.root.update()
+            else:
+                # 通常のターンの場合は後オフセットを前オフセットと同じにして角加速度のみ探索
+                best_rear_offset = self.front_offset_distance
+                best_acc_deg = None
+                best_error = float('inf')
+                
+                # 角加速度の候補値を生成
+                acc_candidates = np.arange(self.min_acc_deg, self.max_acc_deg + 1e-10, adjusted_acc_step)
+                
+                # 全探索数を計算
+                total_iterations = len(acc_candidates)
+                current_iteration = 0
+                
+                # プログレスバーの最大値を設定
+                self.progress['maximum'] = total_iterations
+                
+                for acc_deg in acc_candidates:
+                    # 軸道をシミュレーション
+                    x_end, y_end, phi_final = simulate_full_trajectory(
+                        self.turning_angle_deg, self.translational_velocity,
+                        acc_deg, self.front_offset_distance, best_rear_offset, self.dt,
+                        self.slip_coefficient
+                    )
+                    
+                    # 目標地点との誤差計算
+                    error = math.sqrt((x_end - self.target_x)**2 + (y_end - self.target_y)**2)
+                    
+                    if error < best_error:
+                        best_error = error
+                        best_acc_deg = acc_deg
+                    
+                    # 進捗を更新
+                    current_iteration += 1
+                    self.progress['value'] = current_iteration
+                    
+                    # 5回に1回表示更新
+                    if current_iteration % 5 == 0:
+                        self.root.update()
+            
+            # 計算ボタンを再有効化
+            self.calc_button.config(state=tk.NORMAL)
+            
+            if best_acc_deg is None:
+                tkinter.messagebox.showerror("エラー", "探索結果が見つかりませんでした。")
+                return
+            
+            # 最適パラメータで最終シミュレーション
+            x_end, y_end, phi_final = simulate_full_trajectory(
+                self.turning_angle_deg, self.translational_velocity,
+                best_acc_deg, self.front_offset_distance, best_rear_offset, self.dt,
+                self.slip_coefficient
+            )
+            max_w_rad, max_w_deg = compute_max_angular_velocity(self.turning_angle_deg, best_acc_deg)
+            
+            # 結果の表示
+            self.acc_label.config(text=f"{best_acc_deg:.2f}")
+            self.ang_vel_label.config(text=f"{max_w_deg:.2f}")
+            self.rear_offset_label.config(text=f"{best_rear_offset:.2f}")
+            
+            # 所要時間の計算
+            theta1 = self.turning_angle_deg/3 * math.pi/180
+            alpha_mag = best_acc_deg * math.pi/180
+            t1 = math.sqrt(2 * theta1 / alpha_mag)
+            w1 = -alpha_mag * t1
+            t2 = theta1 / abs(w1)
+            t3 = t1
+            t_straight1 = self.front_offset_distance / self.translational_velocity
+            t_straight2 = best_rear_offset / self.translational_velocity
+            total_time = (t1 + t2 + t3 + t_straight1 + t_straight2) * 1000  # ms単位で表示
+            
+            # プログレスバーを最大値にセットして計算完了を示す
+            self.progress['value'] = self.progress['maximum']
+            self.time_label.config(text=f"{total_time:.2f}")
+            
+            # 軸道の描画
+            self.plot_trajectory(best_acc_deg, best_rear_offset)
+            
+        except ValueError as e:
+            tkinter.messagebox.showerror("入力エラー", f"数値の入力に問題があります: {e}")
+        except Exception as e:
+            tkinter.messagebox.showerror("エラー", f"計算中にエラーが発生しました: {e}")
+    
+    def plot_trajectory(self, best_acc_deg, best_rear_offset):
+        """軸道の描画（元のDrawTrace関数のロジックを使用）"""
+        # 結果はすでにgenerate_trajectoryメソッドで表示されているので、ここでは何もしない
+        # max_w_degの計算のみ行う
+        _, max_w_deg = compute_max_angular_velocity(self.turning_angle_deg, best_acc_deg)
+
+        # 必要なパラメータを設定
+        self.fin_angle = self.turning_angle_deg  # ターン角度を設定
+        
+        # 元のグローバル変数をローカル変数として定義
+        pri_offset = self.front_offset_distance
+        post_offset = best_rear_offset
+        _, max_w_deg = compute_max_angular_velocity(self.turning_angle_deg, best_acc_deg)
+        low_AngVel = max_w_deg
+        Low_AngAcl = best_acc_deg
+        Width = self.robot_width
+        speed = self.translational_velocity
+        speed_ms = speed / 1000.0
+        K_slip_angle = 0.00  # スリップアングル係数（デフォルトで0）
+        
+        # 初期化
+        self.ax.clear()
+        
+        # 格子の描画
+        self.draw_grid()
+        
+        # 軌道計算と描画
+        # フェーズの時間計算
+        alpha_mag = best_acc_deg * math.pi / 180.0
+        theta1 = self.turning_angle_deg * math.pi / 180.0 / 3.0
+        t1 = math.sqrt(2 * theta1 / alpha_mag)
+        w1 = -alpha_mag * t1
+        t2 = theta1 / abs(w1)
+        t3 = t1
+        t_pre = self.front_offset_distance / self.translational_velocity
+        t_post = best_rear_offset / self.translational_velocity
+        t_total = t_pre + t1 + t2 + t3 + t_post
+        
+        # 時間刻みによる軌道生成
+        t_list = np.linspace(0, t_total, 200)
+        x_list = []
+        y_list = []
+        phi_list = []
+        
+        for t in t_list:
+            # フェーズ1: 前オフセット直進
+            if t <= t_pre:
+                x = t * self.translational_velocity
+                y = 0
+                phi = math.pi/2
+            # フェーズ2: クロソイド入り
+            elif t <= t_pre + t1:
+                t_rel = t - t_pre
+                x_pre = self.front_offset_distance
+                y_pre = 0
+                phi0 = math.pi/2
+                
+                phi = phi0 - 0.5 * alpha_mag * t_rel * t_rel
+                v_x = self.translational_velocity * math.cos(phi)
+                v_y = self.translational_velocity * math.sin(phi)
+                
+                # シンプルな積分（精度は低いが十分）
+                dt = t1 / 100
+                x_rel = 0
+                y_rel = 0
+                for i in range(int(t_rel / dt)):
+                    t_i = i * dt
+                    phi_i = phi0 - 0.5 * alpha_mag * t_i * t_i
+                    x_rel += self.translational_velocity * math.cos(phi_i) * dt
+                    y_rel += self.translational_velocity * math.sin(phi_i) * dt
+                
+                x = x_pre + x_rel
+                y = y_pre + y_rel
+            # フェーズ3: 円弧
+            elif t <= t_pre + t1 + t2:
+                t_rel = t - (t_pre + t1)
+                
+                # フェーズ2までの計算
+                x_phase2, y_phase2, phi1 = self.simulate_phase(self.translational_velocity, alpha_mag, t1)
+        
+        # --- 元のDrawTrace関数のロジックを再現 ---
+        # 前オフセット区間
+        fin_x = self.ini_x + pri_offset * np.sin(np.deg2rad(self.ini_angle))
+        fin_y = self.ini_y + pri_offset * np.cos(np.deg2rad(self.ini_angle))
+        self.ax.plot(np.array([self.ini_x, fin_x]), np.array([self.ini_y, fin_y]), color="blue", linestyle="solid")
+        self.ax.plot(np.array([self.ini_x + (Width/2) * np.cos(np.deg2rad(self.ini_angle)), fin_x + (Width/2) * np.cos(np.deg2rad(self.ini_angle))]),
+                np.array([self.ini_y - (Width/2) * np.sin(np.deg2rad(self.ini_angle)), fin_y - (Width/2) * np.sin(np.deg2rad(self.ini_angle))]),
+                color="#888888", linestyle="solid")
+        self.ax.plot(np.array([self.ini_x - (Width/2) * np.cos(np.deg2rad(self.ini_angle)), fin_x - (Width/2) * np.cos(np.deg2rad(self.ini_angle))]),
+                np.array([self.ini_y + (Width/2) * np.sin(np.deg2rad(self.ini_angle)), fin_y + (Width/2) * np.sin(np.deg2rad(self.ini_angle))]),
+                color="#888888", linestyle="solid")
+        
+        # 角速度加速区間
+        now_Angle = self.ini_angle
+        s_now_Angle = self.ini_angle
+        now_AngVel = 0
+        while now_AngVel < low_AngVel:
+            befor_x = fin_x; befor_y = fin_y
+            now_AngVel += Low_AngAcl / 1000.0
+            now_Angle += now_AngVel / 1000.0
+            s_now_Angle = max(now_Angle - (now_AngVel * speed_ms * K_slip_angle), 0)
+            fin_x = befor_x + speed_ms * np.sin(np.deg2rad(s_now_Angle))
+            fin_y = befor_y + speed_ms * np.cos(np.deg2rad(s_now_Angle))
+            self.ax.plot(np.array([befor_x, fin_x]), np.array([befor_y, fin_y]), color="green", linestyle="solid")
+            self.ax.plot(np.array([befor_x + (Width/2)*np.cos(np.deg2rad(s_now_Angle)), fin_x + (Width/2)*np.cos(np.deg2rad(s_now_Angle))]),
+                    np.array([befor_y - (Width/2)*np.sin(np.deg2rad(s_now_Angle)), fin_y - (Width/2)*np.sin(np.deg2rad(s_now_Angle))]),
+                    color="#888888", linestyle="solid")
+            self.ax.plot(np.array([befor_x - (Width/2)*np.cos(np.deg2rad(s_now_Angle)), fin_x - (Width/2)*np.cos(np.deg2rad(s_now_Angle))]),
+                    np.array([befor_y + (Width/2)*np.sin(np.deg2rad(s_now_Angle)), fin_y + (Width/2)*np.sin(np.deg2rad(s_now_Angle))]),
+                    color="#888888", linestyle="solid")
+        
+        # 定速区間
+        now_AngVel = low_AngVel
+        use_angle = now_Angle - self.ini_angle
+        while now_Angle < ((self.ini_angle + self.fin_angle) - use_angle):
+            befor_x = fin_x; befor_y = fin_y
+            now_Angle += low_AngVel / 1000.0
+            s_now_Angle = now_Angle - (low_AngVel * speed_ms * K_slip_angle)
+            fin_x = befor_x + speed_ms * np.sin(np.deg2rad(s_now_Angle))
+            fin_y = befor_y + speed_ms * np.cos(np.deg2rad(s_now_Angle))
+            self.ax.plot(np.array([befor_x, fin_x]), np.array([befor_y, fin_y]), color="red", linestyle="solid")
+            self.ax.plot(np.array([befor_x + (Width/2)*np.cos(np.deg2rad(s_now_Angle)), fin_x + (Width/2)*np.cos(np.deg2rad(s_now_Angle))]),
+                    np.array([befor_y - (Width/2)*np.sin(np.deg2rad(s_now_Angle)), fin_y - (Width/2)*np.sin(np.deg2rad(s_now_Angle))]),
+                    color="#888888", linestyle="solid")
+            self.ax.plot(np.array([befor_x - (Width/2)*np.cos(np.deg2rad(s_now_Angle)), fin_x - (Width/2)*np.cos(np.deg2rad(s_now_Angle))]),
+                    np.array([befor_y + (Width/2)*np.sin(np.deg2rad(s_now_Angle)), fin_y + (Width/2)*np.sin(np.deg2rad(s_now_Angle))]),
+                    color="#888888", linestyle="solid")
+        
+        # 角速度減速区間
+        while now_AngVel > 0:
+            befor_x = fin_x; befor_y = fin_y
+            now_AngVel -= Low_AngAcl / 1000.0
+            now_Angle += now_AngVel / 1000.0
+            s_now_Angle = now_Angle - (now_AngVel * speed_ms * K_slip_angle)
+            fin_x = befor_x + speed_ms * np.sin(np.deg2rad(s_now_Angle))
+            fin_y = befor_y + speed_ms * np.cos(np.deg2rad(s_now_Angle))
+            self.ax.plot(np.array([befor_x, fin_x]), np.array([befor_y, fin_y]), color="green", linestyle="solid")
+            self.ax.plot(np.array([befor_x + (Width/2)*np.cos(np.deg2rad(s_now_Angle)), fin_x + (Width/2)*np.cos(np.deg2rad(s_now_Angle))]),
+                    np.array([befor_y - (Width/2)*np.sin(np.deg2rad(s_now_Angle)), fin_y - (Width/2)*np.sin(np.deg2rad(s_now_Angle))]),
+                    color="#888888", linestyle="solid")
+            self.ax.plot(np.array([befor_x - (Width/2)*np.cos(np.deg2rad(s_now_Angle)), fin_x - (Width/2)*np.cos(np.deg2rad(s_now_Angle))]),
+                    np.array([befor_y + (Width/2)*np.sin(np.deg2rad(s_now_Angle)), fin_y + (Width/2)*np.sin(np.deg2rad(s_now_Angle))]),
+                    color="#888888", linestyle="solid")
+        
+        # 後オフセット区間
+        befor_x = fin_x; befor_y = fin_y
+        fin_x = befor_x + post_offset * np.sin(np.deg2rad(self.ini_angle + self.fin_angle))
+        fin_y = befor_y + post_offset * np.cos(np.deg2rad(self.ini_angle + self.fin_angle))
+        self.ax.plot(np.array([befor_x, fin_x]), np.array([befor_y, fin_y]), color="blue", linestyle="solid")
+        self.ax.plot(np.array([befor_x + (Width/2)*np.cos(np.deg2rad(self.ini_angle + self.fin_angle)),
+                        fin_x + (Width/2)*np.cos(np.deg2rad(self.ini_angle + self.fin_angle))]),
+                np.array([befor_y - (Width/2)*np.sin(np.deg2rad(self.ini_angle + self.fin_angle)),
+                        fin_y - (Width/2)*np.sin(np.deg2rad(self.ini_angle + self.fin_angle))]),
+                color="#888888", linestyle="solid")
+        self.ax.plot(np.array([befor_x - (Width/2)*np.cos(np.deg2rad(self.ini_angle + self.fin_angle)),
+                        fin_x - (Width/2)*np.cos(np.deg2rad(self.ini_angle + self.fin_angle))]),
+                np.array([befor_y + (Width/2)*np.sin(np.deg2rad(self.ini_angle + self.fin_angle)),
+                        fin_y + (Width/2)*np.sin(np.deg2rad(self.ini_angle + self.fin_angle))]),
+                color="#888888", linestyle="solid")
+        
+        # キャンバスの更新
+        self.canvas.draw()
+    
+    def simulate_phase(self, velocity, alpha_mag, t_phase):
+        """単一フェーズのシミュレーション（簡易版）"""
+        phi0 = math.pi/2
+        dt = t_phase / 100
+        x = 0
+        y = 0
+        
+        for i in range(100):
+            t = i * dt
+            phi = phi0 - 0.5 * alpha_mag * t * t
+            x += velocity * math.cos(phi) * dt
+            y += velocity * math.sin(phi) * dt
+        
+        phi_final = phi0 - 0.5 * alpha_mag * t_phase * t_phase
+        return x, y, phi_final
+    
+    def initialize_plot(self):
+        """初期プロットを表示（軸道計算なし）"""
+        # プロットを初期化
+        self.ax.clear()
+        
+        # 軸の設定
+        self.ax.set_xlabel("X [mm]")
+        self.ax.set_ylabel("Y [mm]")
+        self.ax.set_title(f"{self.robot_size} - {self.turn_type}")
+        
+        # 格子と柱を描画
+        self.draw_grid()
+        
+        # スタート地点と目標地点を描画
+        s = self.scale_factor
+        self.ax.plot(0 * s, self.ini_y, 'o', color="blue", markersize=8)  # スタート地点
+        self.ax.plot(self.target_x, self.target_y, 's', color="green", markersize=8)  # ターゲット地点
+        
+        # 軸の範囲を設定
+        if self.robot_size == "ハーフ":
+            self.ax.set_xlim(-50, 150)
+            self.ax.set_ylim(-10, 190)
+        else:  # クラシック
+            self.ax.set_xlim(-100, 300)
+            self.ax.set_ylim(-20, 380)
+        
+        # キャンバスを更新
+        self.canvas.draw()
+        
+        # ユーザーにメッセージを表示
+        self.acc_label.config(text="---")
+        self.ang_vel_label.config(text="---")
+        self.rear_offset_label.config(text="---")
+        self.time_label.config(text="---")
+    
+    def draw_grid(self):
+        """格子線と迷路の柱の描画（元のDrawCanvas関数を移植）"""
+        s = self.scale_factor
+        
+        # 迷路の壁と格子線
+        self.ax.plot(np.array([-45.0, -45.0]) * s, np.array([0.0, 180.0]) * s, color="gray", linestyle="dashed")
+        self.ax.plot(np.array([0.0, 0.0]) * s, np.array([0.0, 180.0]) * s, color="gray", linestyle="dashed")
+        self.ax.plot(np.array([45.0, 45.0]) * s, np.array([0.0, 180.0]) * s, color="gray", linestyle="dashed")
+        self.ax.plot(np.array([90.0, 90.0]) * s, np.array([0.0, 180.0]) * s, color="gray", linestyle="dashed")
+        self.ax.plot(np.array([135.0, 135.0]) * s, np.array([0.0, 180.0]) * s, color="gray", linestyle="dashed")
+        self.ax.plot(np.array([-45.0, 135.0]) * s, np.array([0.0, 0.0]) * s, color="gray", linestyle="dashed")
+        self.ax.plot(np.array([-45.0, 135.0]) * s, np.array([45.0, 45.0]) * s, color="gray", linestyle="dashed")
+        self.ax.plot(np.array([-45.0, 135.0]) * s, np.array([90.0, 90.0]) * s, color="gray", linestyle="dashed")
+        self.ax.plot(np.array([-45.0, 135.0]) * s, np.array([135.0, 135.0]) * s, color="gray", linestyle="dashed")
+        self.ax.plot(np.array([-45.0, 135.0]) * s, np.array([180.0, 180.0]) * s, color="gray", linestyle="dashed")
+        self.ax.plot(np.array([0.0, -45.0]) * s, np.array([180.0, 135.0]) * s, color="gray", linestyle="dashed")
+        self.ax.plot(np.array([90.0, -45.0]) * s, np.array([180.0, 45.0]) * s, color="gray", linestyle="dashed")
+        self.ax.plot(np.array([135.0, 0.0]) * s, np.array([135.0, 0.0]) * s, color="gray", linestyle="dashed")
+        self.ax.plot(np.array([135.0, 90.0]) * s, np.array([45.0, 0.0]) * s, color="gray", linestyle="dashed")
+        self.ax.plot(np.array([90.0, 135.0]) * s, np.array([180.0, 135.0]) * s, color="gray", linestyle="dashed")
+        self.ax.plot(np.array([0.0, 135.0]) * s, np.array([180.0, 45.0]) * s, color="gray", linestyle="dashed")
+        self.ax.plot(np.array([-45.0, 90.0]) * s, np.array([135.0, 0.0]) * s, color="gray", linestyle="dashed")
+        self.ax.plot(np.array([-45.0, 0.0]) * s, np.array([45.0, 0.0]) * s, color="gray", linestyle="dashed")
+        
+        # 迷路の柱（赤い正方形）
+        self.ax.plot(np.array([-48, -48, -42, -42, -48]) * s, np.array([-3, 3, 3, -3, -3]) * s, color="red", linestyle="solid")
+        self.ax.plot(np.array([-48, -48, -42, -42, -48]) * s, np.array([87, 93, 93, 87, 87]) * s, color="red", linestyle="solid")
+        self.ax.plot(np.array([-48, -48, -42, -42, -48]) * s, np.array([177, 183, 183, 177, 177]) * s, color="red", linestyle="solid")
+        self.ax.plot(np.array([42, 42, 48, 48, 42]) * s, np.array([-3, 3, 3, -3, -3]) * s, color="red", linestyle="solid")
+        self.ax.plot(np.array([42, 42, 48, 48, 42]) * s, np.array([87, 93, 93, 87, 87]) * s, color="red", linestyle="solid")
+        self.ax.plot(np.array([42, 42, 48, 48, 42]) * s, np.array([177, 183, 183, 177, 177]) * s, color="red", linestyle="solid")
+        self.ax.plot(np.array([132, 132, 138, 138, 132]) * s, np.array([-3, 3, 3, -3, -3]) * s, color="red", linestyle="solid")
+        self.ax.plot(np.array([132, 132, 138, 138, 132]) * s, np.array([87, 93, 93, 87, 87]) * s, color="red", linestyle="solid")
+        self.ax.plot(np.array([132, 132, 138, 138, 132]) * s, np.array([177, 183, 183, 177, 177]) * s, color="red", linestyle="solid")
+        
+        # 軸の設定
+        self.ax.set_xlim(-50 * s, 150 * s)
+        self.ax.set_ylim(-10 * s, 200 * s)
+        self.ax.set_xlabel('X [mm]')
+        self.ax.set_ylabel('Y [mm]')
+        self.ax.set_title(f'{self.robot_size} {self.turn_type} シミュレーション')
+        self.ax.grid(False)  # グリッドは不要（迷路の格子線があるため）
+    
+    def draw_robot(self, x, y, phi, color):
+        """ロボットを描画"""
+        width = self.robot_width
+        length = width  # 正方形と仮定
+        
+        # ロボットの四隅の座標（ローカル座標系）
+        corners_local = [
+            [-width/2, length/2],  # 左前
+            [width/2, length/2],   # 右前
+            [width/2, -length/2],  # 右後
+            [-width/2, -length/2], # 左後
+            [-width/2, length/2]   # 閉じるために最初の点を繰り返す
+        ]
+        
+        # グローバル座標系に変換
+        corners_global_x = []
+        corners_global_y = []
+        
+        for corner in corners_local:
+            # 回転行列による変換
+            rot_x = corner[0] * math.cos(phi) - corner[1] * math.sin(phi)
+            rot_y = corner[0] * math.sin(phi) + corner[1] * math.cos(phi)
+            
+            # 平行移動
+            global_x = x + rot_x
+            global_y = y + rot_y
+            
+            corners_global_x.append(global_x)
+            corners_global_y.append(global_y)
+        
+        # ロボットの輪郭を描画
+        self.ax.plot(corners_global_x, corners_global_y, color, linewidth=2)
+        
+        # 進行方向を示す矢印
+        arrow_length = width * 0.8
+        arrow_x = x + arrow_length * math.cos(phi)
+        arrow_y = y + arrow_length * math.sin(phi)
+        self.ax.arrow(x, y, arrow_length * math.cos(phi), arrow_length * math.sin(phi), 
+                    head_width=width/5, head_length=width/3, fc=color, ec=color)
+
+# ==========================
+# メイン関数
+# ==========================
+def main():
+    try:
+        # マルチプロセッシングの設定
+        mp.freeze_support()
+        
+        # GUIアプリケーションの起動
+        root = tk.Tk()
+        app = TurnTunerApp(root)
+        root.mainloop()
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"エラーが発生しました: {e}")
+    finally:
+        print("プログラムを終了します...")
+        input("何かキーを押して終了してください...")
+
+if __name__ == "__main__":
+    main()
