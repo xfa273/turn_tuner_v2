@@ -275,7 +275,7 @@ class TurnTunerApp:
                         "velocity": 250,
                         "front_offset": 10,
                         "slip_coefficient": 1.0,
-                        "target_y_error": 2.0,
+                        "target_error": 2.0,
                         "acc_step": 100.0,
                         "precision": 10
                     }
@@ -296,7 +296,7 @@ class TurnTunerApp:
                     "velocity": 250,
                     "front_offset": 10,
                     "slip_coefficient": 1.0,
-                    "target_y_error": 2.0,
+                    "target_error": 2.0,
                     "acc_step": 100.0,
                     "precision": 10
                 }
@@ -321,7 +321,7 @@ class TurnTunerApp:
                     "velocity": self.translational_velocity,
                     "front_offset": self.display_front_offset,
                     "slip_coefficient": self.slip_coefficient,
-                    "target_y_error": float(self.target_y_error_entry.get()),
+                    "target_error": float(self.target_y_error_entry.get()),
                     "acc_step": float(self.acc_step_entry.get()),
                     "precision": self.precision_slider.get()
                 }
@@ -585,16 +585,19 @@ class TurnTunerApp:
         # 自動調整セクション
         ttk.Label(left_frame, text="自動角加速度最適化").grid(row=24, column=0, columnspan=2, sticky=tk.W, pady=5)
         
-        # 目標Y誤差とステップ幅
-        ttk.Label(left_frame, text="目標Y誤差 [mm]:").grid(row=25, column=0, sticky=tk.W, pady=2)
-        self.target_y_error_entry = ttk.Entry(left_frame, width=6)
+        # 目標誤差とステップ幅
+        ttk.Label(left_frame, text="目標誤差 [mm]:").grid(row=25, column=0, sticky=tk.W, pady=2)
+        self.target_y_error_entry = ttk.Entry(left_frame, width=6)  # 変数名は互換性のために維持
         self.target_y_error_entry.grid(row=25, column=1, sticky=tk.W, pady=2)
         
-        # 設定ファイルから目標Y誤差を読み込む
-        target_y_error = 2.0  # デフォルト値
-        if "target_y_error" in self.settings["parameters"]:
-            target_y_error = self.settings["parameters"]["target_y_error"]
-        self.target_y_error_entry.insert(0, str(target_y_error))
+        # 設定ファイルから目標誤差を読み込む
+        target_error = 2.0  # デフォルト値
+        if "target_error" in self.settings["parameters"]:
+            target_error = self.settings["parameters"]["target_error"]
+        elif "target_y_error" in self.settings["parameters"]:
+            # 互換性のための移行処理
+            target_error = self.settings["parameters"]["target_y_error"]
+        self.target_y_error_entry.insert(0, str(target_error))
         
         ttk.Label(left_frame, text="ステップ幅 [円/秒²]:").grid(row=26, column=0, sticky=tk.W, pady=2)
         self.acc_step_entry = ttk.Entry(left_frame, width=6)
@@ -1086,24 +1089,30 @@ class TurnTunerApp:
             self.auto_adjust_button.config(state=tk.NORMAL)
             
     def auto_adjust_acceleration(self):
-        """角加速度を自動調整してY成分の誤差を目標値以下にする"""
+        """角加速度を自動調整してターンタイプに応じた誤差を目標値以下にする
+        90degターンではY方向の誤差を、180degターンではX方向の誤差を最適化する"""
         try:
             # 自動調整ボタンを無効化
             self.auto_adjust_button.config(state=tk.DISABLED)
             self.recalc_button.config(state=tk.DISABLED)
             
             # パラメータ取得
-            target_y_error = float(self.target_y_error_entry.get())
-            acc_step = float(self.acc_step_entry.get())
+            target_error = float(self.target_y_error_entry.get())  # 目標誤差
+            acc_step = float(self.acc_step_entry.get())  # 角加速度のステップ幅
             
             # 現在の角加速度を取得
             current_acc_deg = self.current_best_acc_deg
+            
+            # ターンタイプに応じた最適化対象軸を決定
+            is_180deg_turn = "180deg" in self.turn_type
+            target_axis = "X" if is_180deg_turn else "Y"
             
             # 最適化開始メッセージ
             print("\n===== 角加速度自動最適化開始 =====")
             print(f"ターンタイプ: {self.robot_size} {self.turn_type}")
             print(f"スリップ係数: {self.slip_coefficient:.2f}")
-            print(f"目標Y誤差: {target_y_error:.2f}mm")
+            print(f"最適化対象軸: {target_axis} 方向")
+            print(f"目標誤差: {target_error:.2f}mm")
             print(f"初期角加速度: {current_acc_deg:.2f}円/秒²")
             print(f"後オフセット: {self.current_best_rear_offset:.2f}mm")
             
@@ -1118,7 +1127,7 @@ class TurnTunerApp:
                 self.slip_coefficient
             )
             
-            # 軸道の描画（実際の終点座標を取得）
+            # 軌道の描画（実際の終点座標を取得）
             plot_x_end, plot_y_end = self.plot_trajectory(current_acc_deg, self.current_best_rear_offset)
             
             # 調整済み目標座標との差分計算
@@ -1126,21 +1135,28 @@ class TurnTunerApp:
             current_x_diff = plot_x_end - adjusted_target_x
             current_y_diff = plot_y_end - adjusted_target_y
             
-            # Y成分の誤差を確認
-            print(f"\n初期状態: Y誤差 = {current_y_diff:.2f}mm")
+            # ターンタイプに応じて最適化する誤差を選択
+            if is_180deg_turn:
+                # 180degターンの場合はX方向の誤差を最適化
+                current_error = current_x_diff
+                print(f"\n初期状態: X誤差 = {current_x_diff:.2f}mm")
+            else:
+                # 90degターンの場合はY方向の誤差を最適化
+                current_error = current_y_diff
+                print(f"\n初期状態: Y誤差 = {current_y_diff:.2f}mm")
             
-            # Y誤差が目標以下ならそのまま終了
-            if abs(current_y_diff) <= target_y_error:
-                print(f"現在のY誤差がすでに目標以下です。最適化は不要です。")
+            # 誤差が目標以下ならそのまま終了
+            if abs(current_error) <= target_error:
+                print(f"現在の{target_axis}誤差がすでに目標以下です。最適化は不要です。")
                 # ボタンを再有効化
                 self.auto_adjust_button.config(state=tk.NORMAL)
                 self.recalc_button.config(state=tk.NORMAL)
                 return
             
-            # Y誤差の符号を確認
-            # 正なら外側に膨らんでいるので角加速度を上げる必要がある
-            # 負なら内側に膨らんでいるので角加速度を下げる必要がある
-            increase_acc = current_y_diff > 0
+            # 誤差の符号を確認
+            # 90degターン: Y誤差が正なら外側に膨らんでいるので角加速度を上げる
+            # 180degターン: X誤差が正なら外側に膨らんでいるので完全に同様に角加速度を上げる
+            increase_acc = current_error > 0  # 両方のターンタイプで誤差が正なら角加速度を上げる
             
             if increase_acc:
                 print("外側に膨らんでいるため、角加速度を上げて調整します")
@@ -1155,7 +1171,7 @@ class TurnTunerApp:
             
             # 実際の調整ループ
             best_acc_deg = current_acc_deg
-            best_y_error = abs(current_y_diff)
+            best_error = abs(current_error)  # 選択した軸の誤差を追跡
             iteration = 0
             improved = False
             
@@ -1179,32 +1195,41 @@ class TurnTunerApp:
                     self.slip_coefficient
                 )
                 
-                # 軸道の描画（実際の終点座標を取得）
+                # 軌道の描画（実際の終点座標を取得）
                 plot_x_end, plot_y_end = self.plot_trajectory(new_acc_deg, self.current_best_rear_offset)
                 
                 # 調整済み目標座標との差分計算
                 current_x_diff = plot_x_end - adjusted_target_x
                 current_y_diff = plot_y_end - adjusted_target_y
-                current_y_error = abs(current_y_diff)
+                
+                # ターンタイプに応じて最適化する誤差を選択
+                if is_180deg_turn:
+                    # 180degターンの場合はX方向の誤差を最適化
+                    current_error = current_x_diff
+                    current_error_abs = abs(current_error)
+                else:
+                    # 90degターンの場合はY方向の誤差を最適化
+                    current_error = current_y_diff
+                    current_error_abs = abs(current_error)
                 
                 # 結果を表示
-                print(f"ステップ {iteration+1}: 角加速度={new_acc_deg:.2f}, Y誤差={current_y_diff:.2f}mm")
+                print(f"ステップ {iteration+1}: 角加速度={new_acc_deg:.2f}, {target_axis}誤差={current_error:.2f}mm")
                 
-                # Y誤差が目標以下になったか確認
-                if current_y_error <= target_y_error:
-                    print(f"\n目標誤差に到達しました: {current_y_error:.2f}mm <= {target_y_error:.2f}mm")
+                # 誤差が目標以下になったか確認
+                if current_error_abs <= target_error:
+                    print(f"\n目標誤差に到達しました: {current_error_abs:.2f}mm <= {target_error:.2f}mm")
                     best_acc_deg = new_acc_deg
                     improved = True
                     break
                 
                 # 前回より改善したか
-                if current_y_error < best_y_error:
-                    best_y_error = current_y_error
+                if current_error_abs < best_error:
+                    best_error = current_error_abs
                     best_acc_deg = new_acc_deg
                     improved = True
                     
                 # 逆に差分が大きくなったか（負と正の間を通過した可能性）
-                if (current_y_diff > 0 and not increase_acc) or (current_y_diff < 0 and increase_acc):
+                if (current_error > 0 and not increase_acc) or (current_error < 0 and increase_acc):
                     # ステップ幅の調整回数をカウントアップ
                     step_adjustment_count += 1
                     
@@ -1231,7 +1256,7 @@ class TurnTunerApp:
             if improved:
                 print(f"\n===== 角加速度最適化結果 =====")
                 print(f"最適角加速度: {best_acc_deg:.2f}円/秒² (初期値: {self.current_best_acc_deg:.2f}円/秒²)")
-                print(f"最小ヨ誤差: {best_y_error:.2f}mm (目標: {target_y_error:.2f}mm)")
+                print(f"最小{target_axis}誤差: {best_error:.2f}mm (目標: {target_error:.2f}mm)")
                 
                 # ターン角度を取得
                 # ターンタイプの文字列から角度を抽出
@@ -1286,23 +1311,23 @@ class TurnTunerApp:
                     self.opt_acc_label.config(text=f"{best_acc_deg:.2f}")
                     self.opt_ang_vel_label.config(text=f"{max_w_deg:.2f}")
                     self.opt_rear_offset_label.config(text=f"{best_rear_offset:.2f}")
-                    self.opt_y_error_label.config(text=f"{best_y_error:.2f}")
-                    print(f"\n結果表示成功: 角加速度={best_acc_deg:.2f}, 最大角速度={max_w_deg:.2f}, 後オフセット={best_rear_offset:.2f}, Y誤差={best_y_error:.2f}")
+                    self.opt_y_error_label.config(text=f"{best_error:.2f}")
+                    print(f"\n結果表示成功: 角加速度={best_acc_deg:.2f}, 最大角速度={max_w_deg:.2f}, 後オフセット={best_rear_offset:.2f}, {target_axis}誤差={best_error:.2f}")
                 except Exception as format_err:
                     print(f"\n値の表示中にエラーが発生しました: {format_err}")
                     # エラー発生時も安全に表示
                     self.opt_acc_label.config(text=str(best_acc_deg))
                     self.opt_ang_vel_label.config(text=str(max_w_deg))
                     self.opt_rear_offset_label.config(text=str(best_rear_offset))
-                    self.opt_y_error_label.config(text=str(best_y_error))
+                    self.opt_y_error_label.config(text=str(best_error))
                 
                 # 再計算で使用する最適化後の値を保存
                 self.optimized_values = {
                     "acc_deg": best_acc_deg,
                     "max_w_deg": max_w_deg,
                     "rear_offset": best_rear_offset,
-                    "y_error": best_y_error,
-                    "target_y_error": target_y_error,
+                    "error": best_error,
+                    "target_error": target_error,
                     "initial_acc_deg": self.current_best_acc_deg
                 }
                 
@@ -1316,7 +1341,7 @@ class TurnTunerApp:
                 # 自動調整ボタンを再有効化
                 self.auto_adjust_button.config(state=tk.NORMAL)
             else:
-                print(f"\n最適化に失敗しました。最良の角加速度: {best_acc_deg:.2f}円/秒², Y誤差: {best_y_error:.2f}mm")
+                print(f"\n最適化に失敗しました。最良の角加速度: {best_acc_deg:.2f}円/秒², {target_axis}誤差: {best_error:.2f}mm")
                 # ボタンを再有効化
                 self.auto_adjust_button.config(state=tk.NORMAL)
                 self.recalc_button.config(state=tk.NORMAL)

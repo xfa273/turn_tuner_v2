@@ -15,7 +15,7 @@
         "velocity": 300.0,
         "front_offset": 5.0,
         "slip_coefficient": 1.1,
-        "target_y_error": 0.1,
+        "target_error": 0.5,
         "acc_step": 10.0,
         "precision": 10.0
     }
