@@ -1070,6 +1070,16 @@ class TurnTunerApp:
             print(f"終了位置差分: X={x_diff:.2f}mm, Y={y_diff:.2f}mm, 距離={error:.2f}mm")
             print(f"計算時間: {total_time:.2f}ms")
             
+            # 45度ターンの場合、対角誤差も計算して表示
+            if "45deg" in self.turn_type:
+                diagonal_offset = 90.0 if self.robot_size == "ハーフ" else 180.0
+                diagonal_error = (plot_x_end - plot_y_end + diagonal_offset) / math.sqrt(2)
+                print(f"対角誤差: {diagonal_error:.2f}mm (y=x+{diagonal_offset:.1f}直線より)")
+                
+                # グラフにも対角誤差を表示
+                diagonal_info = f"対角誤差 (y=x+{diagonal_offset:.1f}): {diagonal_error:.2f}mm"
+                self.ax.text(0.05, 0.05, diagonal_info, transform=self.ax.transAxes, fontsize=10, color='red')
+            
             # 再計算ボタンを有効化
             self.recalc_button.config(state=tk.NORMAL)
             self.auto_adjust_button.config(state=tk.NORMAL)
@@ -1105,7 +1115,14 @@ class TurnTunerApp:
             
             # ターンタイプに応じた最適化対象軸を決定
             is_180deg_turn = "180deg" in self.turn_type
-            target_axis = "X" if is_180deg_turn else "Y"
+            is_45deg_turn = "45deg" in self.turn_type
+            
+            if is_180deg_turn:
+                target_axis = "X"
+            elif is_45deg_turn:
+                target_axis = "Diagonal"  # 毎度軸を指定
+            else:
+                target_axis = "Y"  # 90度ターンなどの場合
             
             # 最適化開始メッセージ
             print("\n===== 角加速度自動最適化開始 =====")
@@ -1140,6 +1157,18 @@ class TurnTunerApp:
                 # 180degターンの場合はX方向の誤差を最適化
                 current_error = current_x_diff
                 print(f"\n初期状態: X誤差 = {current_x_diff:.2f}mm")
+            elif is_45deg_turn:
+                # 45degターンの場合は終点からy=x+offset直線までの距離を誤差として使用
+                # ロボットサイズに応じてオフセットを設定
+                if self.robot_size == "ハーフ":
+                    diagonal_offset = 90.0  # ハーフサイズの場合はy=x+90直線
+                else:  # クラシックサイズ
+                    diagonal_offset = 180.0  # クラシックサイズの場合はy=x+180直線
+                
+                # y=x+offset直線からの距離を計算
+                # 式: (x - (y-offset))/sqrt(2) = (x-y+offset)/sqrt(2)
+                current_error = (plot_x_end - plot_y_end + diagonal_offset) / math.sqrt(2)
+                print(f"\n初期状態: 対角誤差 = {current_error:.2f}mm (終点座標: X={plot_x_end:.2f}, Y={plot_y_end:.2f}, 対角オフセット: {diagonal_offset:.1f}mm)")
             else:
                 # 90degターンの場合はY方向の誤差を最適化
                 current_error = current_y_diff
@@ -1155,8 +1184,14 @@ class TurnTunerApp:
             
             # 誤差の符号を確認
             # 90degターン: Y誤差が正なら外側に膨らんでいるので角加速度を上げる
-            # 180degターン: X誤差が正なら外側に膨らんでいるので完全に同様に角加速度を上げる
-            increase_acc = current_error > 0  # 両方のターンタイプで誤差が正なら角加速度を上げる
+            # 180degターン: X誤差が正なら外側に膨らんでいるので角加速度を上げる
+            # 45degターン: 対角誤差が正なら角加速度を下げ、負なら角加速度を上げる
+            if is_45deg_turn:
+                # 45度ターンの場合は符号が逆
+                increase_acc = current_error < 0
+            else:
+                # 90度と180度ターンの場合
+                increase_acc = current_error > 0
             
             if increase_acc:
                 print("外側に膨らんでいるため、角加速度を上げて調整します")
@@ -1207,6 +1242,18 @@ class TurnTunerApp:
                     # 180degターンの場合はX方向の誤差を最適化
                     current_error = current_x_diff
                     current_error_abs = abs(current_error)
+                elif is_45deg_turn:
+                    # 45degターンの場合は終点からy=x+offset直線までの距離を誤差として使用
+                    # ロボットサイズに応じてオフセットを設定
+                    if self.robot_size == "ハーフ":
+                        diagonal_offset = 90.0  # ハーフサイズの場合はy=x+90直線
+                    else:  # クラシックサイズ
+                        diagonal_offset = 180.0  # クラシックサイズの場合はy=x+180直線
+                    
+                    # y=x+offset直線からの距離を計算
+                    # 式: (x - (y-offset))/sqrt(2) = (x-y+offset)/sqrt(2)
+                    current_error = (plot_x_end - plot_y_end + diagonal_offset) / math.sqrt(2)
+                    current_error_abs = abs(current_error)
                 else:
                     # 90degターンの場合はY方向の誤差を最適化
                     current_error = current_y_diff
@@ -1229,14 +1276,22 @@ class TurnTunerApp:
                     improved = True
                     
                 # 逆に差分が大きくなったか（負と正の間を通過した可能性）
-                if (current_error > 0 and not increase_acc) or (current_error < 0 and increase_acc):
+                # 45度ターンでは誤差の符号と角加速度の関係が逆
+                if is_45deg_turn:
+                    # 45度ターンは誤差の符号が逆になるので条件も逆にする
+                    sign_reversal = (current_error < 0 and not increase_acc) or (current_error > 0 and increase_acc)
+                else:
+                    # 90度または180度ターン
+                    sign_reversal = (current_error > 0 and not increase_acc) or (current_error < 0 and increase_acc)
+                
+                if sign_reversal:
                     # ステップ幅の調整回数をカウントアップ
                     step_adjustment_count += 1
                     
                     # 調整回数が上限を超えたか確認
                     if step_adjustment_count >= max_step_adjustments:
-                        print(f"\nY誤差の符号が{step_adjustment_count}回変化しました。")
-                        print(f"目標誤差 ({target_y_error:.2f}mm) に対してステップ幅 ({acc_step:.2f}) が大きすぎるか、")
+                        print(f"\n{target_axis}誤差の符号が{step_adjustment_count}回変化しました。")
+                        print(f"目標誤差 ({target_error:.2f}mm) に対してステップ幅 ({acc_step:.2f}) が大きすぎるか、")
                         print(f"条件を満たすパラメータが見つかりません。最も近い値を採用します。")
                         break  # 探索終了
                     
@@ -1284,7 +1339,7 @@ class TurnTunerApp:
                 best_x_diff = best_plot_x_end - adjusted_target_x
                 print(f"X方向の誤差: {best_x_diff:.2f}mm")
                 
-                # 90度ターンの場合、後ろオフセット距離でX方向の誤差を調整
+                # ターンタイプに応じて後ろオフセット距離を調整
                 if "90deg" in self.turn_type:
                     # 後オフセット値を現在の計算で使用している値から取得
                     original_rear_offset = self.current_best_rear_offset
@@ -1302,8 +1357,59 @@ class TurnTunerApp:
                     
                     # 内部変数を更新して次回の計算でも使用されるようにする
                     self.current_best_rear_offset = best_rear_offset
+                elif "45deg" in self.turn_type:
+                    # 後オフセット値を現在の計算で使用している値から取得
+                    original_rear_offset = self.current_best_rear_offset
+                    
+                    # ロボットサイズに応じて角加速度最適化用の対角オフセットを設定
+                    if self.robot_size == "ハーフ":
+                        forward_diagonal_offset = 90.0  # y=x+90直線
+                        rear_diagonal_offset = 180.0    # y=-x+180直線
+                    else:  # クラシックサイズ
+                        forward_diagonal_offset = 180.0  # y=x+180直線
+                        rear_diagonal_offset = 360.0     # y=-x+360直線
+                    
+                    # 角加速度最適化後の位置から、y=x+offset直線からの対角誤差を計算
+                    # 対角誤差は (x-y+offset)/sqrt(2) で計算される
+                    forward_diagonal_error = (best_plot_x_end - best_plot_y_end + forward_diagonal_offset) / math.sqrt(2)
+                    print(f"対角誤差 (y=x+{forward_diagonal_offset}): {forward_diagonal_error:.2f}mm")
+                    
+                    # 理想的な終点位置は前方対角直線と後方対角直線の交点
+                    # y=x+forward_offset と y=-x+rear_offset の交点は (rear_offset-forward_offset)/2, (rear_offset+forward_offset)/2)
+                    ideal_x = (rear_diagonal_offset - forward_diagonal_offset) / 2
+                    ideal_y = (rear_diagonal_offset + forward_diagonal_offset) / 2
+                    print(f"理想的な終点位置: X={ideal_x:.2f}mm, Y={ideal_y:.2f}mm (対角直線の交点)")
+                    
+                    # 現在の終点から理想位置までの距離を計算
+                    distance_to_ideal = math.sqrt((best_plot_x_end - ideal_x)**2 + (best_plot_y_end - ideal_y)**2)
+                    print(f"理想点までの距離: {distance_to_ideal:.2f}mm")
+                    
+                    # 後方対角直線 (y=-x+rear_offset) からの対角誤差を計算
+                    # 式: (x+y-rear_offset)/sqrt(2)
+                    rear_diagonal_error = (best_plot_x_end + best_plot_y_end - rear_diagonal_offset) / math.sqrt(2)
+                    print(f"後方対角誤差 (y=-x+{rear_diagonal_offset}): {rear_diagonal_error:.2f}mm")
+                    
+                    # 後方対角誤差を相殖するように後オフセットを調整
+                    # 誤差とは逆方向に調整する必要があるので減算を使用
+                    adjusted_rear_offset = original_rear_offset - rear_diagonal_error
+                    best_rear_offset = adjusted_rear_offset
+                    print(f"後ろオフセット距離を調整: {original_rear_offset:.2f}mm → {best_rear_offset:.2f}mm (後方対角誤差: {rear_diagonal_error:.2f}mm)")
+                    
+                    # 調整後の後ろオフセットで軸道を再計算して表示
+                    final_plot_x_end, final_plot_y_end = self.plot_trajectory(best_acc_deg, best_rear_offset)
+                    
+                    # 調整後の対角誤差を計算 (前方と後方の両方)
+                    final_forward_error = (final_plot_x_end - final_plot_y_end + forward_diagonal_offset) / math.sqrt(2)
+                    final_rear_error = (final_plot_x_end + final_plot_y_end - rear_diagonal_offset) / math.sqrt(2)
+                    
+                    print(f"調整後の終点座標: X={final_plot_x_end:.2f}mm, Y={final_plot_y_end:.2f}mm")
+                    print(f"調整後の前方対角誤差: {final_forward_error:.2f}mm (y=x+{forward_diagonal_offset:.1f})")
+                    print(f"調整後の後方対角誤差: {final_rear_error:.2f}mm (y=-x+{rear_diagonal_offset:.1f})")
+                    
+                    # 内部変数を更新して次回の計算でも使用されるようにする
+                    self.current_best_rear_offset = best_rear_offset
                 else:
-                    # 90度ターン以外は調整しない
+                    # 対応していないターンタイプは調整しない
                     best_rear_offset = self.current_best_rear_offset
                 
                 # GUIに最適化後の値を安全に表示
@@ -1631,14 +1737,6 @@ class TurnTunerApp:
         
         # 設定を保存
         self.save_settings()
-        
-        # 終了確認が必要な場合はここに追加
-        print("何かキーを押して終了してください...")
-        try:
-            input()
-        except Exception as e:
-            # str()を使わずに直接表示
-            print(f"\u5165力エラー: {e}")
         
         # Windowを破棄
         self.root.destroy()
