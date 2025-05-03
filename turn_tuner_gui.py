@@ -3,6 +3,7 @@ import math
 import sys
 import os
 import json
+import time
 import numpy as np
 import tkinter as tk
 from tkinter import ttk
@@ -188,6 +189,9 @@ class TurnTunerApp:
     def __init__(self, root):
         self.root = root
         self.root.title("ターンシミュレーター v2")
+        
+        # 閉じるボタンが押されたときの処理を設定
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
         # 設定ファイルのパス
         self.settings_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
@@ -521,7 +525,24 @@ class TurnTunerApp:
         
         # 計算実行ボタン
         self.calc_button = ttk.Button(left_frame, text="軸道計算", command=self.generate_trajectory)
-        self.calc_button.grid(row=18, column=0, columnspan=2, pady=20)
+        self.calc_button.grid(row=18, column=0, columnspan=2, pady=10)
+        
+        # 角加速度調整セクション
+        ttk.Separator(left_frame, orient=tk.HORIZONTAL).grid(row=19, column=0, columnspan=2, sticky="ew", pady=5)
+        
+        ttk.Label(left_frame, text="角加速度調整", font=("Helvetica", 10, "bold")).grid(row=20, column=0, columnspan=2, sticky=tk.W, pady=5)
+        
+        # 角加速度入力フィールド
+        ttk.Label(left_frame, text="角加速度 [円/秒²]:").grid(row=21, column=0, sticky=tk.W, pady=5)
+        self.acc_entry = ttk.Entry(left_frame, width=10)
+        self.acc_entry.grid(row=21, column=1, sticky=tk.W, pady=5)
+        self.acc_entry.insert(0, "0.0")
+        
+        # 軸道再計算ボタン
+        self.recalc_button = ttk.Button(left_frame, text="軸道再計算", command=self.recalculate_trajectory)
+        self.recalc_button.grid(row=22, column=0, columnspan=2, pady=10)
+        # 初期状態では無効化
+        self.recalc_button.config(state=tk.DISABLED)
         
         # ===== 右側フレームの内容 =====
         # Matplotlib図の作成
@@ -692,16 +713,27 @@ class TurnTunerApp:
                 best_acc_deg = None
                 best_error = float('inf')
                 
+                # ターン名から小回り90度ターンかどうかを判定
+                is_small_90deg = "小回り90deg" in self.turn_type
+                
+                # スリップ係数が1.0を超える場合の補正処理（小回り90度ターンのみ対象）
+                slip_correction_enabled = is_small_90deg and self.slip_coefficient > 1.0
+                
                 # 角加速度の候補値を生成
                 acc_candidates = np.arange(self.min_acc_deg, self.max_acc_deg + 1e-10, adjusted_acc_step)
                 
-                # 全探索数を計算
-                total_iterations = len(acc_candidates)
+                # 全探索数を計算（スリップ補正を行う場合は追加の探索が必要）
+                additional_iterations = 0
+                if slip_correction_enabled:
+                    additional_iterations = int(len(acc_candidates) * 0.5)  # 追加探索の回数（候補の半分程度）
+                
+                total_iterations = len(acc_candidates) + additional_iterations
                 current_iteration = 0
                 
                 # プログレスバーの最大値を設定
                 self.progress['maximum'] = total_iterations
                 
+                # 第1段階: 通常の探索で最適角加速度を見つける
                 for acc_deg in acc_candidates:
                     # 軸道をシミュレーション
                     x_end, y_end, phi_final = simulate_full_trajectory(
@@ -716,6 +748,7 @@ class TurnTunerApp:
                     if error < best_error:
                         best_error = error
                         best_acc_deg = acc_deg
+                        best_y_end = y_end  # Y座標を保存
                     
                     # 進捗を更新
                     current_iteration += 1
@@ -724,6 +757,62 @@ class TurnTunerApp:
                     # 5回に1回表示更新
                     if current_iteration % 5 == 0:
                         self.root.update()
+                
+                # 第2段階: 小回り90度ターンかつスリップ係数>1.0の場合、Y座標に基づく補正を適用
+                if slip_correction_enabled and best_acc_deg is not None:
+                    # Y座標の目標値と現在の差
+                    y_error = best_y_end - self.target_y
+                    
+                    # Y座標が目標より大きい場合（外側に膨らんでいる場合）
+                    if y_error > 2.0:  # 2mm以上のずれがある場合のみ補正
+                        print(f"スリップ補正開始: 現在のY誤差 = {y_error:.2f}mm")
+                        
+                        # 現在の最適角加速度から段階的に角加速度を上げていく
+                        corrected_acc_deg = best_acc_deg
+                        correction_step = adjusted_acc_step * 0.5  # より細かいステップで補正
+                        best_corrected_error = best_error
+                        correction_iterations = 0
+                        
+                        while correction_iterations < additional_iterations:
+                            # 角加速度を少し上げる
+                            corrected_acc_deg += correction_step
+                            
+                            # 上限を超えないようにする
+                            if corrected_acc_deg > self.max_acc_deg:
+                                break
+                            
+                            # 補正した角加速度でシミュレーション
+                            x_end, y_end, phi_final = simulate_full_trajectory(
+                                self.turning_angle_deg, self.translational_velocity,
+                                corrected_acc_deg, self.front_offset_distance, best_rear_offset, self.dt,
+                                self.slip_coefficient
+                            )
+                            
+                            # 目標地点との誤差計算
+                            error = math.sqrt((x_end - self.target_x)**2 + (y_end - self.target_y)**2)
+                            
+                            # Y座標の誤差が小さくなり、かつ全体の誤差も改善される場合に採用
+                            new_y_error = abs(y_end - self.target_y)
+                            if new_y_error < abs(y_error) and error <= best_corrected_error * 1.2:  # 多少の誤差増加は許容
+                                best_acc_deg = corrected_acc_deg
+                                best_corrected_error = error
+                                y_error = y_end - self.target_y
+                                print(f"スリップ補正: 角加速度={best_acc_deg:.2f}, Y誤差={y_error:.2f}mm")
+                                
+                                # 十分に改善された場合は終了
+                                if abs(y_error) < 1.0:  # 1mm以下になったら十分
+                                    break
+                            
+                            # 進捗を更新
+                            current_iteration += 1
+                            self.progress['value'] = current_iteration
+                            correction_iterations += 1
+                            
+                            # 表示更新
+                            if correction_iterations % 2 == 0:
+                                self.root.update()
+                        
+                        print(f"スリップ補正完了: 最終角加速度 = {best_acc_deg:.2f}, Y誤差 = {y_error:.2f}mm")
             
             # 計算ボタンを再有効化
             self.calc_button.config(state=tk.NORMAL)
@@ -760,18 +849,170 @@ class TurnTunerApp:
             self.progress['value'] = self.progress['maximum']
             self.time_label.config(text=f"{total_time:.2f}")
             
-            # 軸道の描画
-            self.plot_trajectory(best_acc_deg, best_rear_offset)
+            # 軸道の描画（実際の終点座標を取得）
+            plot_x_end, plot_y_end = self.plot_trajectory(best_acc_deg, best_rear_offset)
+            
+            # 計算終点とグラフ描画の終点の差を確認
+            calc_diff = math.sqrt((x_end - plot_x_end)**2 + (y_end - plot_y_end)**2)
+            if calc_diff > 1.0:  # 1mm以上の差があればログ表示
+                print(f"\n警告: 計算終点とグラフ描画終点に不一致があります: {calc_diff:.2f}mm")
+                print(f"  計算終点: ({x_end:.2f}, {y_end:.2f}), グラフ描画終点: ({plot_x_end:.2f}, {plot_y_end:.2f})")
+            
+            # 小回り90degターンの場合、目標座標を調整
+            adjusted_target_x = self.target_x
+            adjusted_target_y = self.target_y
+            
+            # 小回り90degターンの場合、目標座標にY方向に半区画分の調整が必要
+            if "90deg" in self.turn_type:
+                half_cell = 45.0 if self.robot_size == "ハーフ" else 90.0
+                adjusted_target_y += half_cell
+            
+            # 調整後の目標座標とグラフ描画の終点座標から差分を計算
+            x_diff = plot_x_end - adjusted_target_x
+            y_diff = plot_y_end - adjusted_target_y
+            error = math.sqrt(x_diff**2 + y_diff**2)
+            
+            # 座標差分情報をグラフに表示
+            position_info = f"目標差: X={x_diff:.2f}mm, Y={y_diff:.2f}mm, 距離={error:.2f}mm"
+            self.ax.text(0.05, 0.15, position_info, transform=self.ax.transAxes, fontsize=10, color='purple')
+            
+            # スリップ係数情報を追加
+            slip_info = f"スリップ係数: {self.slip_coefficient:.2f}"
+            self.ax.text(0.05, 0.10, slip_info, transform=self.ax.transAxes, fontsize=10, color='blue')
+            
+            # 計算結果のコンソール表示
+            print("\n===== 計算結果 =====")
+            print(f"ターンタイプ: {self.robot_size} {self.turn_type}")
+            print(f"スリップ係数: {self.slip_coefficient:.2f}")
+            print(f"計算検討数: {current_iteration}")
+            print(f"角加速度: {best_acc_deg:.2f}円/秒²")
+            print(f"最高角速度: {max_w_deg:.2f}円/秒")
+            print(f"後オフセット: {best_rear_offset:.2f}mm")
+            # 目標座標の表示を調整前と調整後の両方を表示
+            if adjusted_target_y != self.target_y:
+                print(f"元の目標座標: X={self.target_x:.2f}mm, Y={self.target_y:.2f}mm")
+                print(f"調整後目標座標: X={adjusted_target_x:.2f}mm, Y={adjusted_target_y:.2f}mm (半区画調整済)")
+            else:
+                print(f"目標座標: X={adjusted_target_x:.2f}mm, Y={adjusted_target_y:.2f}mm")
+                
+            print(f"到達座標: X={plot_x_end:.2f}mm, Y={plot_y_end:.2f}mm")
+            print(f"終了位置差分: X={x_diff:.2f}mm, Y={y_diff:.2f}mm, 距離={error:.2f}mm")
+            
+            # 角加速度調整用の入力欄を更新
+            self.acc_entry.delete(0, tk.END)
+            self.acc_entry.insert(0, f"{best_acc_deg:.2f}")
+            
+            # 再計算ボタンを有効化
+            self.recalc_button.config(state=tk.NORMAL)
+            
+            # 計算結果を保存して手動調整時に使用する
+            self.current_best_acc_deg = best_acc_deg
+            self.current_best_rear_offset = best_rear_offset
             
         except ValueError as e:
             tkinter.messagebox.showerror("入力エラー", f"数値の入力に問題があります: {e}")
         except Exception as e:
             tkinter.messagebox.showerror("エラー", f"計算中にエラーが発生しました: {e}")
     
+    def recalculate_trajectory(self):
+        """角加速度を手動で調整して軸道を再計算する"""
+        try:
+            # 再計算ボタンを無効化
+            self.recalc_button.config(state=tk.DISABLED)
+            
+            # 入力値の取得
+            manual_acc_deg = float(self.acc_entry.get())
+            
+            # 始時刻を記録
+            start_time = time.time()
+            
+            # 計算に使用するパラメータを手動設定値と前回の値を使用
+            best_acc_deg = manual_acc_deg
+            best_rear_offset = self.current_best_rear_offset
+            
+            # 最大角速度を計算
+            _, max_w_deg = compute_max_angular_velocity(self.turning_angle_deg, best_acc_deg)
+            
+            # 軸道をシミュレーション
+            x_end, y_end, phi_final = simulate_full_trajectory(
+                self.turning_angle_deg, self.translational_velocity,
+                best_acc_deg, self.front_offset_distance, best_rear_offset, self.dt,
+                self.slip_coefficient
+            )
+            
+            # 軸道の描画（実際の終点座標を取得）
+            plot_x_end, plot_y_end = self.plot_trajectory(best_acc_deg, best_rear_offset)
+            
+            # 計算終点とグラフ描画の終点の差を確認
+            calc_diff = math.sqrt((x_end - plot_x_end)**2 + (y_end - plot_y_end)**2)
+            if calc_diff > 1.0:  # 1mm以上の差があればログ表示
+                print(f"\n警告: 計算終点とグラフ描画終点に不一致があります: {calc_diff:.2f}mm")
+                print(f"  計算終点: ({x_end:.2f}, {y_end:.2f}), グラフ描画終点: ({plot_x_end:.2f}, {plot_y_end:.2f})")
+            
+            # 小回り90degターンの場合、目標座標を調整
+            adjusted_target_x = self.target_x
+            adjusted_target_y = self.target_y
+            
+            # 小回り90degターンの場合、目標座標にY方向に半区画分の調整が必要
+            if "90deg" in self.turn_type:
+                half_cell = 45.0 if self.robot_size == "ハーフ" else 90.0
+                adjusted_target_y += half_cell
+            
+            # 調整後の目標座標とグラフ描画の終点座標から差分を計算
+            x_diff = plot_x_end - adjusted_target_x
+            y_diff = plot_y_end - adjusted_target_y
+            error = math.sqrt(x_diff**2 + y_diff**2)
+            
+            # 座標差分情報をグラフに表示
+            position_info = f"目標差: X={x_diff:.2f}mm, Y={y_diff:.2f}mm, 距離={error:.2f}mm"
+            self.ax.text(0.05, 0.15, position_info, transform=self.ax.transAxes, fontsize=10, color='purple')
+            
+            # スリップ係数情報を追加
+            slip_info = f"スリップ係数: {self.slip_coefficient:.2f}"
+            self.ax.text(0.05, 0.10, slip_info, transform=self.ax.transAxes, fontsize=10, color='blue')
+            
+            # 計算終了時間を記録
+            end_time = time.time()
+            total_time = (end_time - start_time) * 1000  # ミリ秒に変換
+            
+            # 再計算結果のコンソール表示
+            print("\n===== 手動調整再計算結果 =====")
+            print(f"ターンタイプ: {self.robot_size} {self.turn_type}")
+            print(f"スリップ係数: {self.slip_coefficient:.2f}")
+            print(f"角加速度(手動設定): {best_acc_deg:.2f}円/秒²")
+            print(f"最高角速度: {max_w_deg:.2f}円/秒")
+            print(f"後オフセット: {best_rear_offset:.2f}mm")
+            
+            # 目標座標の表示を調整前と調整後の両方を表示
+            if adjusted_target_y != self.target_y:
+                print(f"元の目標座標: X={self.target_x:.2f}mm, Y={self.target_y:.2f}mm")
+                print(f"調整後目標座標: X={adjusted_target_x:.2f}mm, Y={adjusted_target_y:.2f}mm (半区画調整済)")
+            else:
+                print(f"目標座標: X={adjusted_target_x:.2f}mm, Y={adjusted_target_y:.2f}mm")
+                
+            print(f"到達座標: X={plot_x_end:.2f}mm, Y={plot_y_end:.2f}mm")
+            print(f"終了位置差分: X={x_diff:.2f}mm, Y={y_diff:.2f}mm, 距離={error:.2f}mm")
+            print(f"計算時間: {total_time:.2f}ms")
+            
+            # 再計算ボタンを有効化
+            self.recalc_button.config(state=tk.NORMAL)
+            
+        except ValueError as e:
+            tkinter.messagebox.showerror("入力エラー", f"角加速度値の入力に問題があります: {e}")
+            # 元の値に戻す
+            self.acc_entry.delete(0, tk.END)
+            self.acc_entry.insert(0, str(self.current_best_acc_deg))
+            # 再計算ボタンを有効化
+            self.recalc_button.config(state=tk.NORMAL)
+        except Exception as e:
+            tkinter.messagebox.showerror("エラー", f"再計算中にエラーが発生しました: {e}")
+            # 再計算ボタンを有効化
+            self.recalc_button.config(state=tk.NORMAL)
+    
     def plot_trajectory(self, best_acc_deg, best_rear_offset):
-        """軸道の描画（元のDrawTrace関数のロジックを使用）"""
-        # 結果はすでにgenerate_trajectoryメソッドで表示されているので、ここでは何もしない
-        # max_w_degの計算のみ行う
+        """軸道の描画（元のDrawTrace関数のロジックを使用）
+        実際の終点座標を返すように改善"""
+        # max_w_degの計算
         _, max_w_deg = compute_max_angular_velocity(self.turning_angle_deg, best_acc_deg)
 
         # 必要なパラメータを設定
@@ -786,7 +1027,10 @@ class TurnTunerApp:
         Width = self.robot_width
         speed = self.translational_velocity
         speed_ms = speed / 1000.0
-        K_slip_angle = 0.00  # スリップアングル係数（デフォルトで0）
+        
+        # スリップアングル係数をUIから設定した値に基づいて計算
+        # スリップ係数が1を超える場合は、その超過分をスリップアングル係数として使用
+        K_slip_angle = max(0.0, (self.slip_coefficient - 1.0) * 0.05)  # スリップを設定値に合わせて調整
         
         # 初期化
         self.ax.clear()
@@ -930,6 +1174,9 @@ class TurnTunerApp:
         
         # キャンバスの更新
         self.canvas.draw()
+        
+        # 実際の終点座標を返す（後オフセット区間の終点）
+        return fin_x, fin_y
     
     def simulate_phase(self, velocity, alpha_mag, t_phase):
         """単一フェーズのシミュレーション（簡易版）"""
@@ -1025,6 +1272,15 @@ class TurnTunerApp:
         self.ax.set_title(f'{self.robot_size} {self.turn_type} シミュレーション')
         self.ax.grid(False)  # グリッドは不要（迷路の格子線があるため）
     
+    def on_closing(self):
+        """閉じるボタンが押されたときの処理"""
+        # 設定を保存
+        self.save_settings()
+        # ウィンドウを破棄
+        self.root.destroy()
+        # プログラムを終了
+        sys.exit(0)
+
     def draw_robot(self, x, y, phi, color):
         """ロボットを描画"""
         width = self.robot_width

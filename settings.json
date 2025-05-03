@@ -4,15 +4,15 @@
             "width": 36.0
         },
         "クラシック": {
-            "width": 70.0
+            "width": 68.0
         }
     },
     "current_selection": {
-        "robot_size": "クラシック",
-        "turn_type": "大回り90deg"
+        "robot_size": "ハーフ",
+        "turn_type": "小回り90deg"
     },
     "parameters": {
-        "velocity": 1000.0,
-        "front_offset": 10.0
+        "velocity": 300.0,
+        "front_offset": 5.0
     }
 }
