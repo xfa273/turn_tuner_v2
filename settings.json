@@ -9,10 +9,14 @@
     },
     "current_selection": {
         "robot_size": "ハーフ",
-        "turn_type": "小回り90deg"
+        "turn_type": "大回り180deg"
     },
     "parameters": {
         "velocity": 300.0,
-        "front_offset": 5.0
+        "front_offset": 5.0,
+        "slip_coefficient": 1.1,
+        "target_y_error": 0.1,
+        "acc_step": 10.0,
+        "precision": 10.0
     }
 }

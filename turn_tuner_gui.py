@@ -199,6 +199,9 @@ class TurnTunerApp:
         # 設定ファイルから設定を読み込む
         self.settings = self.load_settings()
         
+        # 最適化結果保存用の変数
+        self.optimized_values = None
+        
         # ロボットサイズ設定を取得
         self.robot_settings = self.settings["robot_settings"]
         
@@ -270,7 +273,11 @@ class TurnTunerApp:
                     },
                     "parameters": {
                         "velocity": 250,
-                        "front_offset": 10
+                        "front_offset": 10,
+                        "slip_coefficient": 1.0,
+                        "target_y_error": 2.0,
+                        "acc_step": 100.0,
+                        "precision": 10
                     }
                 }
         except Exception as e:
@@ -287,7 +294,11 @@ class TurnTunerApp:
                 },
                 "parameters": {
                     "velocity": 250,
-                    "front_offset": 10
+                    "front_offset": 10,
+                    "slip_coefficient": 1.0,
+                    "target_y_error": 2.0,
+                    "acc_step": 100.0,
+                    "precision": 10
                 }
             }
     
@@ -308,7 +319,11 @@ class TurnTunerApp:
                 # 現在の入力値
                 "parameters": {
                     "velocity": self.translational_velocity,
-                    "front_offset": self.display_front_offset
+                    "front_offset": self.display_front_offset,
+                    "slip_coefficient": self.slip_coefficient,
+                    "target_y_error": float(self.target_y_error_entry.get()),
+                    "acc_step": float(self.acc_step_entry.get()),
+                    "precision": self.precision_slider.get()
                 }
             }
             
@@ -468,44 +483,67 @@ class TurnTunerApp:
         ttk.Label(left_frame, text="スリップ係数:").grid(row=5, column=0, sticky=tk.W, pady=5)
         self.slip_entry = ttk.Entry(left_frame, width=15)
         self.slip_entry.grid(row=5, column=1, sticky=tk.W, pady=5)
-        self.slip_entry.insert(0, str(self.slip_coefficient))
+        
+        # 設定ファイルからスリップ係数を読み込む
+        slip_coefficient = 1.0  # デフォルト値
+        if "slip_coefficient" in self.settings["parameters"]:
+            slip_coefficient = self.settings["parameters"]["slip_coefficient"]
+            self.slip_coefficient = slip_coefficient  # 内部変数も更新
+        self.slip_entry.insert(0, str(slip_coefficient))
         
         # 機体幅更新ボタン
         self.width_update_btn = ttk.Button(left_frame, text="幅を更新", command=self.update_robot_width)
         self.width_update_btn.grid(row=6, column=0, columnspan=2, pady=5)
         
         # 結果表示ラベル
-        ttk.Label(left_frame, text="--- 計算結果 ---").grid(row=7, column=0, columnspan=2, sticky=tk.W, pady=10)
+        ttk.Label(left_frame, text="--- 計算結果 ---").grid(row=7, column=0, columnspan=3, sticky=tk.W, pady=10)
         
-        ttk.Label(left_frame, text="角加速度 [deg/s²]:").grid(row=8, column=0, sticky=tk.W, pady=5)
+        # 列ヘダー
+        ttk.Label(left_frame, text="初期探索値", font=(None, 8)).grid(row=7, column=1, sticky=tk.W, pady=1)
+        ttk.Label(left_frame, text="最適化後", font=(None, 8)).grid(row=7, column=2, sticky=tk.W, pady=1)
+        
+        ttk.Label(left_frame, text="角加速度 [deg/s²]:").grid(row=8, column=0, sticky=tk.W, pady=2)
         self.acc_label = ttk.Label(left_frame, text="---")
-        self.acc_label.grid(row=8, column=1, sticky=tk.W, pady=5)
+        self.acc_label.grid(row=8, column=1, sticky=tk.W, pady=2)
+        self.opt_acc_label = ttk.Label(left_frame, text="---", foreground="blue")
+        self.opt_acc_label.grid(row=8, column=2, sticky=tk.W, pady=2)
         
-        ttk.Label(left_frame, text="最大角速度 [deg/s]:").grid(row=9, column=0, sticky=tk.W, pady=5)
+        ttk.Label(left_frame, text="最大角速度 [deg/s]:").grid(row=9, column=0, sticky=tk.W, pady=2)
         self.ang_vel_label = ttk.Label(left_frame, text="---")
-        self.ang_vel_label.grid(row=9, column=1, sticky=tk.W, pady=5)
+        self.ang_vel_label.grid(row=9, column=1, sticky=tk.W, pady=2)
+        self.opt_ang_vel_label = ttk.Label(left_frame, text="---", foreground="blue")
+        self.opt_ang_vel_label.grid(row=9, column=2, sticky=tk.W, pady=2)
         
-        ttk.Label(left_frame, text="後オフセット [mm]:").grid(row=10, column=0, sticky=tk.W, pady=5)
+        ttk.Label(left_frame, text="後オフセット [mm]:").grid(row=10, column=0, sticky=tk.W, pady=2)
         self.rear_offset_label = ttk.Label(left_frame, text="---")
-        self.rear_offset_label.grid(row=10, column=1, sticky=tk.W, pady=5)
+        self.rear_offset_label.grid(row=10, column=1, sticky=tk.W, pady=2)
+        self.opt_rear_offset_label = ttk.Label(left_frame, text="---", foreground="blue")
+        self.opt_rear_offset_label.grid(row=10, column=2, sticky=tk.W, pady=2)
         
-        ttk.Label(left_frame, text="所要時間 [ms]:").grid(row=11, column=0, sticky=tk.W, pady=5)
+        # Y差分情報
+        ttk.Label(left_frame, text="Y誤差 [mm]:").grid(row=11, column=0, sticky=tk.W, pady=2)
+        self.y_error_label = ttk.Label(left_frame, text="---")
+        self.y_error_label.grid(row=11, column=1, sticky=tk.W, pady=2)
+        self.opt_y_error_label = ttk.Label(left_frame, text="---", foreground="blue")
+        self.opt_y_error_label.grid(row=11, column=2, sticky=tk.W, pady=2)
+        
+        ttk.Label(left_frame, text="所要時間 [ms]:").grid(row=12, column=0, sticky=tk.W, pady=2)
         self.time_label = ttk.Label(left_frame, text="---")
-        self.time_label.grid(row=11, column=1, sticky=tk.W, pady=5)
+        self.time_label.grid(row=12, column=1, sticky=tk.W, pady=2)
         
         # 図の説明
-        ttk.Label(left_frame, text="--- シミュレーション表示 ---").grid(row=12, column=0, columnspan=2, sticky=tk.W, pady=10)
-        ttk.Label(left_frame, text="\u25CF: スタート地点").grid(row=13, column=0, sticky=tk.W)
-        ttk.Label(left_frame, text="\u25A0: ターゲット地点").grid(row=13, column=1, sticky=tk.W)
-        ttk.Label(left_frame, text="赤線: 軸道").grid(row=14, column=0, sticky=tk.W)
-        ttk.Label(left_frame, text="青線: クロソイド入り").grid(row=14, column=1, sticky=tk.W)
-        ttk.Label(left_frame, text="緑線: 定速円弧").grid(row=15, column=0, sticky=tk.W)
-        ttk.Label(left_frame, text="黄線: クロソイド抜け").grid(row=15, column=1, sticky=tk.W)
+        ttk.Label(left_frame, text="--- シミュレーション表示 ---").grid(row=13, column=0, columnspan=3, sticky=tk.W, pady=10)
+        ttk.Label(left_frame, text="●: スタート地点").grid(row=14, column=0, sticky=tk.W)
+        ttk.Label(left_frame, text="■: ターゲット地点").grid(row=14, column=1, sticky=tk.W)
+        ttk.Label(left_frame, text="赤線: 軸道").grid(row=15, column=0, sticky=tk.W)
+        ttk.Label(left_frame, text="青線: クロソイド入り").grid(row=15, column=1, sticky=tk.W)
+        ttk.Label(left_frame, text="緑線: 定速円弧").grid(row=16, column=0, sticky=tk.W)
+        ttk.Label(left_frame, text="黄線: クロソイド抜け").grid(row=16, column=1, sticky=tk.W)
         
         # 計算精度の設定
-        ttk.Label(left_frame, text="計算精度:").grid(row=16, column=0, sticky=tk.W, pady=5)
+        ttk.Label(left_frame, text="計算精度:").grid(row=17, column=0, sticky=tk.W, pady=5)
         self.precision_frame = ttk.Frame(left_frame)
-        self.precision_frame.grid(row=16, column=1, sticky=tk.W, pady=5)
+        self.precision_frame.grid(row=17, column=1, columnspan=2, sticky=tk.W, pady=5)
         ttk.Label(self.precision_frame, text="高速").pack(side=tk.LEFT, padx=2)
         self.precision_slider = ttk.Scale(self.precision_frame, from_=0, to=10, orient=tk.HORIZONTAL, length=100)
         self.precision_slider.pack(side=tk.LEFT, padx=2)
@@ -519,30 +557,60 @@ class TurnTunerApp:
             self.precision_slider.set(10)
         
         # プログレスバー
-        ttk.Label(left_frame, text="計算進捗:").grid(row=17, column=0, sticky=tk.W, pady=5)
+        ttk.Label(left_frame, text="計算進捗:").grid(row=18, column=0, sticky=tk.W, pady=5)
         self.progress = ttk.Progressbar(left_frame, orient=tk.HORIZONTAL, length=150, mode='determinate')
-        self.progress.grid(row=17, column=1, sticky=tk.W, pady=5)
+        self.progress.grid(row=18, column=1, columnspan=2, sticky=tk.W, pady=5)
         
         # 計算実行ボタン
-        self.calc_button = ttk.Button(left_frame, text="軸道計算", command=self.generate_trajectory)
-        self.calc_button.grid(row=18, column=0, columnspan=2, pady=10)
+        self.calc_button = ttk.Button(left_frame, text="軌道計算", command=self.generate_trajectory)
+        self.calc_button.grid(row=19, column=0, columnspan=3, pady=10)
         
         # 角加速度調整セクション
-        ttk.Separator(left_frame, orient=tk.HORIZONTAL).grid(row=19, column=0, columnspan=2, sticky="ew", pady=5)
+        ttk.Separator(left_frame, orient=tk.HORIZONTAL).grid(row=20, column=0, columnspan=3, sticky="ew", pady=5)
         
-        ttk.Label(left_frame, text="角加速度調整", font=("Helvetica", 10, "bold")).grid(row=20, column=0, columnspan=2, sticky=tk.W, pady=5)
+        ttk.Label(left_frame, text="角加速度調整", font=("Helvetica", 10, "bold")).grid(row=21, column=0, columnspan=2, sticky=tk.W, pady=5)
         
         # 角加速度入力フィールド
-        ttk.Label(left_frame, text="角加速度 [円/秒²]:").grid(row=21, column=0, sticky=tk.W, pady=5)
+        ttk.Label(left_frame, text="角加速度 [円/秒²]:").grid(row=22, column=0, sticky=tk.W, pady=5)
         self.acc_entry = ttk.Entry(left_frame, width=10)
-        self.acc_entry.grid(row=21, column=1, sticky=tk.W, pady=5)
+        self.acc_entry.grid(row=22, column=1, sticky=tk.W, pady=5)
         self.acc_entry.insert(0, "0.0")
         
         # 軸道再計算ボタン
         self.recalc_button = ttk.Button(left_frame, text="軸道再計算", command=self.recalculate_trajectory)
-        self.recalc_button.grid(row=22, column=0, columnspan=2, pady=10)
+        self.recalc_button.grid(row=23, column=0, columnspan=2, pady=5)
         # 初期状態では無効化
         self.recalc_button.config(state=tk.DISABLED)
+        
+        # 自動調整セクション
+        ttk.Label(left_frame, text="自動角加速度最適化").grid(row=24, column=0, columnspan=2, sticky=tk.W, pady=5)
+        
+        # 目標Y誤差とステップ幅
+        ttk.Label(left_frame, text="目標Y誤差 [mm]:").grid(row=25, column=0, sticky=tk.W, pady=2)
+        self.target_y_error_entry = ttk.Entry(left_frame, width=6)
+        self.target_y_error_entry.grid(row=25, column=1, sticky=tk.W, pady=2)
+        
+        # 設定ファイルから目標Y誤差を読み込む
+        target_y_error = 2.0  # デフォルト値
+        if "target_y_error" in self.settings["parameters"]:
+            target_y_error = self.settings["parameters"]["target_y_error"]
+        self.target_y_error_entry.insert(0, str(target_y_error))
+        
+        ttk.Label(left_frame, text="ステップ幅 [円/秒²]:").grid(row=26, column=0, sticky=tk.W, pady=2)
+        self.acc_step_entry = ttk.Entry(left_frame, width=6)
+        self.acc_step_entry.grid(row=26, column=1, sticky=tk.W, pady=2)
+        
+        # 設定ファイルからステップ幅を読み込む
+        acc_step = 100.0  # デフォルト値
+        if "acc_step" in self.settings["parameters"]:
+            acc_step = self.settings["parameters"]["acc_step"]
+        self.acc_step_entry.insert(0, str(acc_step))
+        
+        # 自動調整ボタン
+        self.auto_adjust_button = ttk.Button(left_frame, text="角加速度自動最適化", command=self.auto_adjust_acceleration)
+        self.auto_adjust_button.grid(row=27, column=0, columnspan=2, pady=5)
+        # 初期状態では無効化
+        self.auto_adjust_button.config(state=tk.DISABLED)
         
         # ===== 右側フレームの内容 =====
         # Matplotlib図の作成
@@ -625,6 +693,9 @@ class TurnTunerApp:
             # 入力された値は常に表示用の値
             self.display_front_offset = float(self.front_offset_entry.get())
             
+            # スリップ係数を入力欄から取得
+            self.slip_coefficient = float(self.slip_entry.get())
+            
             # 小回り90degの場合、計算用には半区画分を加算
             if self.turn_type == "小回り90deg":
                 half_cell = 45.0 if self.robot_size == "ハーフ" else 90.0
@@ -632,9 +703,6 @@ class TurnTunerApp:
             else:
                 # それ以外のターンは表示用値と計算用値は同じ
                 self.front_offset_distance = self.display_front_offset
-            
-            # スリップアングル係数の取得
-            self.slip_coefficient = float(self.slip_entry.get())
             
             # 計算精度の取得
             precision_value = self.precision_slider.get()
@@ -902,12 +970,17 @@ class TurnTunerApp:
             self.acc_entry.delete(0, tk.END)
             self.acc_entry.insert(0, f"{best_acc_deg:.2f}")
             
-            # 再計算ボタンを有効化
+            # 再計算ボタンと自動調整ボタンを有効化
             self.recalc_button.config(state=tk.NORMAL)
+            self.auto_adjust_button.config(state=tk.NORMAL)
             
             # 計算結果を保存して手動調整時に使用する
             self.current_best_acc_deg = best_acc_deg
             self.current_best_rear_offset = best_rear_offset
+            
+            # 実際の終点座標と調整済み目標座標を保存
+            self.current_plot_end = (plot_x_end, plot_y_end)
+            self.current_adjusted_target = (adjusted_target_x, adjusted_target_y)
             
         except ValueError as e:
             tkinter.messagebox.showerror("入力エラー", f"数値の入力に問題があります: {e}")
@@ -996,6 +1069,7 @@ class TurnTunerApp:
             
             # 再計算ボタンを有効化
             self.recalc_button.config(state=tk.NORMAL)
+            self.auto_adjust_button.config(state=tk.NORMAL)
             
         except ValueError as e:
             tkinter.messagebox.showerror("入力エラー", f"角加速度値の入力に問題があります: {e}")
@@ -1004,9 +1078,258 @@ class TurnTunerApp:
             self.acc_entry.insert(0, str(self.current_best_acc_deg))
             # 再計算ボタンを有効化
             self.recalc_button.config(state=tk.NORMAL)
+            self.auto_adjust_button.config(state=tk.NORMAL)
         except Exception as e:
             tkinter.messagebox.showerror("エラー", f"再計算中にエラーが発生しました: {e}")
             # 再計算ボタンを有効化
+            self.recalc_button.config(state=tk.NORMAL)
+            self.auto_adjust_button.config(state=tk.NORMAL)
+            
+    def auto_adjust_acceleration(self):
+        """角加速度を自動調整してY成分の誤差を目標値以下にする"""
+        try:
+            # 自動調整ボタンを無効化
+            self.auto_adjust_button.config(state=tk.DISABLED)
+            self.recalc_button.config(state=tk.DISABLED)
+            
+            # パラメータ取得
+            target_y_error = float(self.target_y_error_entry.get())
+            acc_step = float(self.acc_step_entry.get())
+            
+            # 現在の角加速度を取得
+            current_acc_deg = self.current_best_acc_deg
+            
+            # 最適化開始メッセージ
+            print("\n===== 角加速度自動最適化開始 =====")
+            print(f"ターンタイプ: {self.robot_size} {self.turn_type}")
+            print(f"スリップ係数: {self.slip_coefficient:.2f}")
+            print(f"目標Y誤差: {target_y_error:.2f}mm")
+            print(f"初期角加速度: {current_acc_deg:.2f}円/秒²")
+            print(f"後オフセット: {self.current_best_rear_offset:.2f}mm")
+            
+            # プログレスバーをリセット
+            self.progress['value'] = 0
+            self.root.update()
+            
+            # 最初の軸道をシミュレーション
+            x_end, y_end, phi_final = simulate_full_trajectory(
+                self.turning_angle_deg, self.translational_velocity,
+                current_acc_deg, self.front_offset_distance, self.current_best_rear_offset, self.dt,
+                self.slip_coefficient
+            )
+            
+            # 軸道の描画（実際の終点座標を取得）
+            plot_x_end, plot_y_end = self.plot_trajectory(current_acc_deg, self.current_best_rear_offset)
+            
+            # 調整済み目標座標との差分計算
+            adjusted_target_x, adjusted_target_y = self.current_adjusted_target
+            current_x_diff = plot_x_end - adjusted_target_x
+            current_y_diff = plot_y_end - adjusted_target_y
+            
+            # Y成分の誤差を確認
+            print(f"\n初期状態: Y誤差 = {current_y_diff:.2f}mm")
+            
+            # Y誤差が目標以下ならそのまま終了
+            if abs(current_y_diff) <= target_y_error:
+                print(f"現在のY誤差がすでに目標以下です。最適化は不要です。")
+                # ボタンを再有効化
+                self.auto_adjust_button.config(state=tk.NORMAL)
+                self.recalc_button.config(state=tk.NORMAL)
+                return
+            
+            # Y誤差の符号を確認
+            # 正なら外側に膨らんでいるので角加速度を上げる必要がある
+            # 負なら内側に膨らんでいるので角加速度を下げる必要がある
+            increase_acc = current_y_diff > 0
+            
+            if increase_acc:
+                print("外側に膨らんでいるため、角加速度を上げて調整します")
+            else:
+                print("内側に膨らんでいるため、角加速度を下げて調整します")
+                # ステップ幅を負にする
+                acc_step = -acc_step
+            
+            # プログレスバーの最大値を設定（最大100ステップまで）
+            max_iterations = 100
+            self.progress['maximum'] = max_iterations
+            
+            # 実際の調整ループ
+            best_acc_deg = current_acc_deg
+            best_y_error = abs(current_y_diff)
+            iteration = 0
+            improved = False
+            
+            # ステップ幅の調整回数をカウントする変数
+            step_adjustment_count = 0
+            max_step_adjustments = 3  # 最大調整回数
+            
+            while iteration < max_iterations:
+                # 角加速度を調整
+                new_acc_deg = current_acc_deg + acc_step * (iteration + 1)
+                
+                # 角加速度の範囲を超えたら終了
+                if new_acc_deg < self.min_acc_deg or new_acc_deg > self.max_acc_deg:
+                    print(f"\n角加速度が範囲外になりました: {new_acc_deg:.2f}円/秒²")
+                    break
+                
+                # 軸道をシミュレーション
+                x_end, y_end, phi_final = simulate_full_trajectory(
+                    self.turning_angle_deg, self.translational_velocity,
+                    new_acc_deg, self.front_offset_distance, self.current_best_rear_offset, self.dt,
+                    self.slip_coefficient
+                )
+                
+                # 軸道の描画（実際の終点座標を取得）
+                plot_x_end, plot_y_end = self.plot_trajectory(new_acc_deg, self.current_best_rear_offset)
+                
+                # 調整済み目標座標との差分計算
+                current_x_diff = plot_x_end - adjusted_target_x
+                current_y_diff = plot_y_end - adjusted_target_y
+                current_y_error = abs(current_y_diff)
+                
+                # 結果を表示
+                print(f"ステップ {iteration+1}: 角加速度={new_acc_deg:.2f}, Y誤差={current_y_diff:.2f}mm")
+                
+                # Y誤差が目標以下になったか確認
+                if current_y_error <= target_y_error:
+                    print(f"\n目標誤差に到達しました: {current_y_error:.2f}mm <= {target_y_error:.2f}mm")
+                    best_acc_deg = new_acc_deg
+                    improved = True
+                    break
+                
+                # 前回より改善したか
+                if current_y_error < best_y_error:
+                    best_y_error = current_y_error
+                    best_acc_deg = new_acc_deg
+                    improved = True
+                    
+                # 逆に差分が大きくなったか（負と正の間を通過した可能性）
+                if (current_y_diff > 0 and not increase_acc) or (current_y_diff < 0 and increase_acc):
+                    # ステップ幅の調整回数をカウントアップ
+                    step_adjustment_count += 1
+                    
+                    # 調整回数が上限を超えたか確認
+                    if step_adjustment_count >= max_step_adjustments:
+                        print(f"\nY誤差の符号が{step_adjustment_count}回変化しました。")
+                        print(f"目標誤差 ({target_y_error:.2f}mm) に対してステップ幅 ({acc_step:.2f}) が大きすぎるか、")
+                        print(f"条件を満たすパラメータが見つかりません。最も近い値を採用します。")
+                        break  # 探索終了
+                    
+                    print(f"\nY誤差の符号が変化しました。最適値を通過した可能性があります。")
+                    # ステップ幅を半分にして逆方向に探索
+                    acc_step = -acc_step / 2
+                    current_acc_deg = best_acc_deg  # 現在までの最適値から再探索
+                    iteration = 0  # カウンターをリセット
+                    continue
+                
+                # 進捗を更新
+                iteration += 1
+                self.progress['value'] = iteration
+                self.root.update()
+            
+            # 最終結果を表示
+            if improved:
+                print(f"\n===== 角加速度最適化結果 =====")
+                print(f"最適角加速度: {best_acc_deg:.2f}円/秒² (初期値: {self.current_best_acc_deg:.2f}円/秒²)")
+                print(f"最小ヨ誤差: {best_y_error:.2f}mm (目標: {target_y_error:.2f}mm)")
+                
+                # ターン角度を取得
+                # ターンタイプの文字列から角度を抽出
+                if "45deg" in self.turn_type:
+                    turning_angle_deg = 45.0
+                elif "90deg" in self.turn_type:
+                    turning_angle_deg = 90.0
+                elif "135deg" in self.turn_type:
+                    turning_angle_deg = 135.0
+                elif "180deg" in self.turn_type:
+                    turning_angle_deg = 180.0
+                else:
+                    # デフォルト値
+                    turning_angle_deg = 90.0
+                
+                # 最高角速度と後オフセットを計算
+                # 関数はタプル(max_w_rad, max_w_deg)を返すので、度数法の値（第２要素）だけを取得
+                _, max_w_deg = compute_max_angular_velocity(turning_angle_deg, best_acc_deg)
+                
+                # 最適化された軌道の終点座標を取得
+                # plot_trajectoryメソッドを利用して現在の最適化された軌道を描画し、終点座標を取得
+                best_plot_x_end, best_plot_y_end = self.plot_trajectory(best_acc_deg, self.current_best_rear_offset)
+                
+                # X方向の誤差を計算
+                best_x_diff = best_plot_x_end - adjusted_target_x
+                print(f"X方向の誤差: {best_x_diff:.2f}mm")
+                
+                # 90度ターンの場合、後ろオフセット距離でX方向の誤差を調整
+                if "90deg" in self.turn_type:
+                    # 後オフセット値を現在の計算で使用している値から取得
+                    original_rear_offset = self.current_best_rear_offset
+                    # X方向の誤差を相殺するように後ろオフセットを調整
+                    # 誤差とは逆方向に調整する必要があるので減算を使用
+                    adjusted_rear_offset = original_rear_offset - best_x_diff
+                    best_rear_offset = adjusted_rear_offset
+                    print(f"後ろオフセット距離を調整: {original_rear_offset:.2f}mm → {best_rear_offset:.2f}mm (X誤差: {best_x_diff:.2f}mm)")
+                    
+                    # 調整後の後ろオフセットで軌道を再計算して表示
+                    final_plot_x_end, final_plot_y_end = self.plot_trajectory(best_acc_deg, best_rear_offset)
+                    print(f"調整後の終点座標: X={final_plot_x_end:.2f}mm, Y={final_plot_y_end:.2f}mm")
+                    print(f"調整後のX誤差: {final_plot_x_end - adjusted_target_x:.2f}mm")
+                    print(f"調整後のY誤差: {final_plot_y_end - adjusted_target_y:.2f}mm")
+                    
+                    # 内部変数を更新して次回の計算でも使用されるようにする
+                    self.current_best_rear_offset = best_rear_offset
+                else:
+                    # 90度ターン以外は調整しない
+                    best_rear_offset = self.current_best_rear_offset
+                
+                # GUIに最適化後の値を安全に表示
+                try:
+                    self.opt_acc_label.config(text=f"{best_acc_deg:.2f}")
+                    self.opt_ang_vel_label.config(text=f"{max_w_deg:.2f}")
+                    self.opt_rear_offset_label.config(text=f"{best_rear_offset:.2f}")
+                    self.opt_y_error_label.config(text=f"{best_y_error:.2f}")
+                    print(f"\n結果表示成功: 角加速度={best_acc_deg:.2f}, 最大角速度={max_w_deg:.2f}, 後オフセット={best_rear_offset:.2f}, Y誤差={best_y_error:.2f}")
+                except Exception as format_err:
+                    print(f"\n値の表示中にエラーが発生しました: {format_err}")
+                    # エラー発生時も安全に表示
+                    self.opt_acc_label.config(text=str(best_acc_deg))
+                    self.opt_ang_vel_label.config(text=str(max_w_deg))
+                    self.opt_rear_offset_label.config(text=str(best_rear_offset))
+                    self.opt_y_error_label.config(text=str(best_y_error))
+                
+                # 再計算で使用する最適化後の値を保存
+                self.optimized_values = {
+                    "acc_deg": best_acc_deg,
+                    "max_w_deg": max_w_deg,
+                    "rear_offset": best_rear_offset,
+                    "y_error": best_y_error,
+                    "target_y_error": target_y_error,
+                    "initial_acc_deg": self.current_best_acc_deg
+                }
+                
+                # 最適角加速度を入力欄に設定
+                self.acc_entry.delete(0, tk.END)
+                self.acc_entry.insert(0, f"{best_acc_deg:.2f}")
+                
+                # 最終的なシミュレーションを実行
+                self.recalculate_trajectory()
+                
+                # 自動調整ボタンを再有効化
+                self.auto_adjust_button.config(state=tk.NORMAL)
+            else:
+                print(f"\n最適化に失敗しました。最良の角加速度: {best_acc_deg:.2f}円/秒², Y誤差: {best_y_error:.2f}mm")
+                # ボタンを再有効化
+                self.auto_adjust_button.config(state=tk.NORMAL)
+                self.recalc_button.config(state=tk.NORMAL)
+            
+        except ValueError as e:
+            tkinter.messagebox.showerror("入力エラー", f"自動調整用パラメータの入力に問題があります: {e}")
+            # ボタンを再有効化
+            self.auto_adjust_button.config(state=tk.NORMAL)
+            self.recalc_button.config(state=tk.NORMAL)
+        except Exception as e:
+            tkinter.messagebox.showerror("エラー", f"自動調整中にエラーが発生しました: {e}")
+            # ボタンを再有効化
+            self.auto_adjust_button.config(state=tk.NORMAL)
             self.recalc_button.config(state=tk.NORMAL)
     
     def plot_trajectory(self, best_acc_deg, best_rear_offset):
@@ -1273,13 +1596,27 @@ class TurnTunerApp:
         self.ax.grid(False)  # グリッドは不要（迷路の格子線があるため）
     
     def on_closing(self):
-        """閉じるボタンが押されたときの処理"""
+        """Windowが閉じられるときの処理"""
+        print("\nプログラムを終了します...")
+        
+        # タプルが関係する変数フォーマットの記録をクリアする
+        self.current_plot_end = None
+        self.current_adjusted_target = None
+        self.optimized_values = None
+        
         # 設定を保存
         self.save_settings()
-        # ウィンドウを破棄
+        
+        # 終了確認が必要な場合はここに追加
+        print("何かキーを押して終了してください...")
+        try:
+            input()
+        except Exception as e:
+            # str()を使わずに直接表示
+            print(f"\u5165力エラー: {e}")
+        
+        # Windowを破棄
         self.root.destroy()
-        # プログラムを終了
-        sys.exit(0)
 
     def draw_robot(self, x, y, phi, color):
         """ロボットを描画"""
