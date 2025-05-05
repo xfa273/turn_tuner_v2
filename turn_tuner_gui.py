@@ -1080,6 +1080,34 @@ class TurnTunerApp:
                 diagonal_info = f"対角誤差 (y=x+{diagonal_offset:.1f}): {diagonal_error:.2f}mm"
                 self.ax.text(0.05, 0.05, diagonal_info, transform=self.ax.transAxes, fontsize=10, color='red')
             
+            # 135度ターンの場合、対角誤差も計算して表示
+            elif "135deg" in self.turn_type:
+                # ハーフサイズではy=-x+180、クラシックサイズではy=-x+360の直線を使用
+                diagonal_offset = 180.0 if self.robot_size == "ハーフ" else 360.0
+                
+                # 点と直線の距離の正しい計算式: |Ax + By + C|/sqrt(A^2 + B^2)
+                # y=-x+offsetの場合は A=1, B=1, C=-offset
+                diagonal_error = abs(plot_x_end + plot_y_end - diagonal_offset) / math.sqrt(2)
+                
+                # 対角誤差の詳細計算を表示
+                print(f"\n=== 135度ターン対角誤差計算詳細 ===")
+                print(f"ロボットサイズ: {self.robot_size}")
+                print(f"目標対角線の式: y = -x + {diagonal_offset:.1f}")
+                print(f"到達座標: X={plot_x_end:.2f}mm, Y={plot_y_end:.2f}mm")
+                print(f"点と直線の距離計算: |X + Y - {diagonal_offset:.1f}|/√2")
+                print(f"計算値: |{plot_x_end:.2f} + {plot_y_end:.2f} - {diagonal_offset:.1f}|/√2 = {diagonal_error:.2f}mm")
+                print(f"対角誤差: {diagonal_error:.2f}mm (y=-x+{diagonal_offset:.1f}直線より)")
+                
+                # グラフにも対角誤差を表示
+                diagonal_info = f"対角誤差 (y=-x+{diagonal_offset:.1f}): {diagonal_error:.2f}mm"
+                self.ax.text(0.05, 0.05, diagonal_info, transform=self.ax.transAxes, fontsize=10, color='red')
+                
+                # 対角線を表示する
+                x_line = np.array([0, 400])
+                y_line = -x_line + diagonal_offset
+                self.ax.plot(x_line, y_line, '--', color='red', linewidth=1, alpha=0.7, label=f'y=-x+{diagonal_offset:.1f}')
+                self.ax.legend()
+            
             # 再計算ボタンを有効化
             self.recalc_button.config(state=tk.NORMAL)
             self.auto_adjust_button.config(state=tk.NORMAL)
@@ -1116,11 +1144,14 @@ class TurnTunerApp:
             # ターンタイプに応じた最適化対象軸を決定
             is_180deg_turn = "180deg" in self.turn_type
             is_45deg_turn = "45deg" in self.turn_type
+            is_135deg_turn = "135deg" in self.turn_type
             
             if is_180deg_turn:
                 target_axis = "X"
             elif is_45deg_turn:
-                target_axis = "Diagonal"  # 毎度軸を指定
+                target_axis = "Diagonal(y=x+offset)"  # 45度ターンはy=x+offset直線からの距離
+            elif is_135deg_turn:
+                target_axis = "Diagonal(y=-x+offset)"  # 135度ターンはy=-x+offset直線からの距離
             else:
                 target_axis = "Y"  # 90度ターンなどの場合
             
@@ -1169,6 +1200,19 @@ class TurnTunerApp:
                 # 式: (x - (y-offset))/sqrt(2) = (x-y+offset)/sqrt(2)
                 current_error = (plot_x_end - plot_y_end + diagonal_offset) / math.sqrt(2)
                 print(f"\n初期状態: 対角誤差 = {current_error:.2f}mm (終点座標: X={plot_x_end:.2f}, Y={plot_y_end:.2f}, 対角オフセット: {diagonal_offset:.1f}mm)")
+            elif is_135deg_turn:
+                # 135degターンの場合は終点からy=-x+offset直線までの距離を誤差として使用
+                # ロボットサイズに応じてオフセットを設定
+                if self.robot_size == "ハーフ":
+                    diagonal_offset = 180.0  # ハーフサイズの場合はy=-x+180直線
+                else:  # クラシックサイズ
+                    diagonal_offset = 360.0  # クラシックサイズの場合はy=-x+360直線
+                
+                # y=-x+offset直線からの距離を計算
+                # 点と直線の距離の正しい計算式: |Ax + By + C|/sqrt(A^2 + B^2)
+                # y=-x+offsetの場合は A=1, B=1, C=-offset
+                current_error = abs(plot_x_end + plot_y_end - diagonal_offset) / math.sqrt(2)
+                print(f"\n初期状態: 対角誤差 = {current_error:.2f}mm (終点座標: X={plot_x_end:.2f}, Y={plot_y_end:.2f}, 対角オフセット: {diagonal_offset:.1f}mm)")
             else:
                 # 90degターンの場合はY方向の誤差を最適化
                 current_error = current_y_diff
@@ -1186,11 +1230,15 @@ class TurnTunerApp:
             # 90degターン: Y誤差が正なら外側に膨らんでいるので角加速度を上げる
             # 180degターン: X誤差が正なら外側に膨らんでいるので角加速度を上げる
             # 45degターン: 対角誤差が正なら角加速度を下げ、負なら角加速度を上げる
+            # 135degターン: 対角誤差が正なら角加速度を上げ、負なら角加速度を下げる
             if is_45deg_turn:
                 # 45度ターンの場合は符号が逆
                 increase_acc = current_error < 0
+            elif is_135deg_turn:
+                # 135度ターンの場合は通常の関係
+                increase_acc = current_error > 0
             else:
-                # 90度と180度ターンの場合
+                # 90度または180度ターンの場合
                 increase_acc = current_error > 0
             
             if increase_acc:
@@ -1254,6 +1302,19 @@ class TurnTunerApp:
                     # 式: (x - (y-offset))/sqrt(2) = (x-y+offset)/sqrt(2)
                     current_error = (plot_x_end - plot_y_end + diagonal_offset) / math.sqrt(2)
                     current_error_abs = abs(current_error)
+                elif is_135deg_turn:
+                    # 135degターンの場合は終点からy=-x+offset直線までの距離を誤差として使用
+                    # ロボットサイズに応じてオフセットを設定
+                    if self.robot_size == "ハーフ":
+                        diagonal_offset = 180.0  # ハーフサイズの場合はy=-x+180直線
+                    else:  # クラシックサイズ
+                        diagonal_offset = 360.0  # クラシックサイズの場合はy=-x+360直線
+                    
+                    # y=-x+offset直線からの距離を計算
+                    # 点と直線の距離の正しい計算式: |Ax + By + C|/sqrt(A^2 + B^2)
+                    # y=-x+offsetの場合は A=1, B=1, C=-offset
+                    current_error = abs(plot_x_end + plot_y_end - diagonal_offset) / math.sqrt(2)
+                    current_error_abs = abs(current_error)
                 else:
                     # 90degターンの場合はY方向の誤差を最適化
                     current_error = current_y_diff
@@ -1280,6 +1341,9 @@ class TurnTunerApp:
                 if is_45deg_turn:
                     # 45度ターンは誤差の符号が逆になるので条件も逆にする
                     sign_reversal = (current_error < 0 and not increase_acc) or (current_error > 0 and increase_acc)
+                elif is_135deg_turn:
+                    # 135度ターンは90度/180度ターンと同じ関係
+                    sign_reversal = (current_error > 0 and not increase_acc) or (current_error < 0 and increase_acc)
                 else:
                     # 90度または180度ターン
                     sign_reversal = (current_error > 0 and not increase_acc) or (current_error < 0 and increase_acc)
@@ -1405,6 +1469,68 @@ class TurnTunerApp:
                     print(f"調整後の終点座標: X={final_plot_x_end:.2f}mm, Y={final_plot_y_end:.2f}mm")
                     print(f"調整後の前方対角誤差: {final_forward_error:.2f}mm (y=x+{forward_diagonal_offset:.1f})")
                     print(f"調整後の後方対角誤差: {final_rear_error:.2f}mm (y=-x+{rear_diagonal_offset:.1f})")
+                    
+                    # 内部変数を更新して次回の計算でも使用されるようにする
+                    self.current_best_rear_offset = best_rear_offset
+                elif "135deg" in self.turn_type:
+                    # 後オフセット値を現在の計算で使用している値から取得
+                    original_rear_offset = self.current_best_rear_offset
+                    
+                    # ロボットサイズに応じて角加速度最適化用の対角オフセットを設定
+                    if self.robot_size == "ハーフ":
+                        backward_diagonal_offset = 180.0  # 角加速度最適化用: y=-x+180直線
+                        forward_diagonal_offset = 0.0    # 後オフセット設定用: y=x+0直線
+                    else:  # クラシックサイズ
+                        backward_diagonal_offset = 360.0  # 角加速度最適化用: y=-x+360直線
+                        forward_diagonal_offset = 0.0     # 後オフセット設定用: y=x+0直線
+                    
+                    print(f"\n=== 135度ターンの後オフセット設定詳細 ===")
+                    print(f"135度ターンの後オフセットをy=x直線からの対角距離で設定します")
+                    
+                    # 終点からy=x直線までの距離を計算
+                    # 式: (x-y)/sqrt(2)
+                    x_diagonal_error = (best_plot_x_end - best_plot_y_end) / math.sqrt(2)
+                    print(f"終点座標: X={best_plot_x_end:.2f}mm, Y={best_plot_y_end:.2f}mm")
+                    print(f"y=x直線からの距離: {x_diagonal_error:.2f}mm")
+                    
+                    # 後オフセット距離をy=x直線からの対角距離として設定
+                    # 誤差とは逆方向に調整する必要があるので減算を使用
+                    adjusted_rear_offset = original_rear_offset - x_diagonal_error
+                    best_rear_offset = adjusted_rear_offset
+                    print(f"後オフセット距離を設定: {original_rear_offset:.2f}mm → {best_rear_offset:.2f}mm (対角誤差: {x_diagonal_error:.2f}mm)")
+                    
+                    # 後オフセット距離がマイナスになった場合のエラー表示
+                    if best_rear_offset < 0:
+                        error_message = "警告: 後オフセット距離がマイナスになりました"
+                        print(f"\n!!! {error_message} !!!")
+                        print(f"計算後の後オフセット距離: {best_rear_offset:.2f}mm")
+                        print("実装上の制約: 後オフセット距離は0以上である必要があります")
+                        print("推奨対応: 前オフセット距離を長くして再設定してください")
+                        
+                        # メッセージボックスにエラーを表示
+                        tkinter.messagebox.showwarning("後オフセット距離エラー", 
+                                                 f"{error_message}\n\n計算後の後オフセット距離: {best_rear_offset:.2f}mm\n\n実装上の制約: 後オフセット距離は0以上である必要があります\n推奨対応: 前オフセット距離を長くして再設定してください")
+                        
+                        # 後オフセットを最小値（0）に設定
+                        best_rear_offset = 0.0
+                        print(f"後オフセット距離を最小値（0.0mm）に設定しました。")
+                    
+                    # 設定後の後オフセットで軸道を再計算して表示
+                    final_plot_x_end, final_plot_y_end = self.plot_trajectory(best_acc_deg, best_rear_offset)
+                    
+                    # 後方対角直線（角加速度最適化用）と前方対角直線（y=x）からの誤差を計算
+                    final_backward_error = abs(final_plot_x_end + final_plot_y_end - backward_diagonal_offset) / math.sqrt(2)
+                    final_forward_error = (final_plot_x_end - final_plot_y_end) / math.sqrt(2)
+                    
+                    print(f"設定後の終点座標: X={final_plot_x_end:.2f}mm, Y={final_plot_y_end:.2f}mm")
+                    print(f"設定後の後方対角誤差: {final_backward_error:.2f}mm (y=-x+{backward_diagonal_offset:.1f})")
+                    print(f"設定後のy=x直線からの距離: {final_forward_error:.2f}mm")
+                    
+                    # グラフにy=x直線も表示する
+                    x_line = np.array([0, 400])
+                    y_line = x_line
+                    self.ax.plot(x_line, y_line, '--', color='blue', linewidth=1, alpha=0.7, label='y=x')
+                    self.ax.legend()
                     
                     # 内部変数を更新して次回の計算でも使用されるようにする
                     self.current_best_rear_offset = best_rear_offset
