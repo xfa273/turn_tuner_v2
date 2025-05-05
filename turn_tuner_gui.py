@@ -1534,6 +1534,54 @@ class TurnTunerApp:
                     
                     # 内部変数を更新して次回の計算でも使用されるようにする
                     self.current_best_rear_offset = best_rear_offset
+                elif "180deg" in self.turn_type:
+                    # 後オフセット値を現在の計算で使用している値から取得
+                    original_rear_offset = self.current_best_rear_offset
+                    
+                    # ロボットサイズに応じたY方向の目標収量位置を設定
+                    y_target_collection = 45.0 if self.robot_size == "ハーフ" else 90.0
+                    
+                    # Y方向の誤差を計算 - 目標収量位置に対する誤差
+                    best_y_diff = best_plot_y_end - y_target_collection
+                    
+                    print(f"\n=== 180度ターンの後オフセット設定詳細 ===")
+                    print(f"終点座標: X={best_plot_x_end:.2f}mm, Y={best_plot_y_end:.2f}mm")
+                    print(f"Y方向の目標収量位置: Y={y_target_collection:.2f}mm")
+                    print(f"Y方向の誤差: {best_y_diff:.2f}mm (終点Y - 目標Y)")
+                    
+                    # 180度ターンの場合、後オフセットはY軸負方向に進む
+                    # 目標よりY座標が大きい場合（best_y_diff > 0）、後オフセットを長くする必要がある
+                    # 目標よりY座標が小さい場合（best_y_diff < 0）、後オフセットを短くする必要がある
+                    adjusted_rear_offset = original_rear_offset + best_y_diff
+                    best_rear_offset = adjusted_rear_offset
+                    print(f"後オフセット距離を設定: {original_rear_offset:.2f}mm → {best_rear_offset:.2f}mm (Y誤差: {best_y_diff:.2f}mm)")
+                    print(f"説明: 180度ターンでは、終点Y > 目標Yの場合は後オフセットを長くし、終点Y < 目標Yの場合は後オフセットを短くする")
+                    
+                    # 後オフセット距離がマイナスになった場合のエラー表示
+                    if best_rear_offset < 0:
+                        error_message = "警告: 後オフセット距離がマイナスになりました"
+                        print(f"\n!!! {error_message} !!!")
+                        print(f"計算後の後オフセット距離: {best_rear_offset:.2f}mm")
+                        print("実装上の制約: 後オフセット距離は0以上である必要があります")
+                        print("推奨対応: 前オフセット距離を長くして再設定してください")
+                        
+                        # メッセージボックスにエラーを表示
+                        tkinter.messagebox.showwarning("後オフセット距離エラー", 
+                                                 f"{error_message}\n\n計算後の後オフセット距離: {best_rear_offset:.2f}mm\n\n実装上の制約: 後オフセット距離は0以上である必要があります\n推奨対応: 前オフセット距離を長くして再設定してください")
+                        
+                        # 後オフセットを最小値（0）に設定
+                        best_rear_offset = 0.0
+                        print(f"後オフセット距離を最小値（0.0mm）に設定しました。")
+                    
+                    # 設定後の後オフセットで軸道を再計算して表示
+                    final_plot_x_end, final_plot_y_end = self.plot_trajectory(best_acc_deg, best_rear_offset)
+                    
+                    print(f"設定後の終点座標: X={final_plot_x_end:.2f}mm, Y={final_plot_y_end:.2f}mm")
+                    print(f"設定後のX誤差: {final_plot_x_end - adjusted_target_x:.2f}mm")
+                    print(f"設定後のY誤差: {final_plot_y_end - adjusted_target_y:.2f}mm")
+                    
+                    # 内部変数を更新して次回の計算でも使用されるようにする
+                    self.current_best_rear_offset = best_rear_offset
                 else:
                     # 対応していないターンタイプは調整しない
                     best_rear_offset = self.current_best_rear_offset
