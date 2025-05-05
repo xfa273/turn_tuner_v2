@@ -903,7 +903,17 @@ class TurnTunerApp:
             # 結果の表示
             self.acc_label.config(text=f"{best_acc_deg:.2f}")
             self.ang_vel_label.config(text=f"{max_w_deg:.2f}")
-            self.rear_offset_label.config(text=f"{best_rear_offset:.2f}")
+            
+            # 表示用の後オフセット値を計算（内部計算値はそのまま）
+            display_offset = 45.0 if self.robot_size == "ハーフ" else 90.0
+            display_rear_offset = best_rear_offset - display_offset if "90deg" in self.turn_type else best_rear_offset
+            self.rear_offset_label.config(text=f"{display_rear_offset:.2f}")
+            
+            # コンソールにも表示情報を出力（内部値と表示値の両方）
+            if "90deg" in self.turn_type:
+                print(f"後オフセット距離: {best_rear_offset:.2f}mm（内部値）, {display_rear_offset:.2f}mm（表示値）")
+            else:
+                print(f"後オフセット距離: {best_rear_offset:.2f}mm")
             
             # 所要時間の計算
             theta1 = self.turning_angle_deg/3 * math.pi/180
@@ -1407,11 +1417,19 @@ class TurnTunerApp:
                 if "90deg" in self.turn_type:
                     # 後オフセット値を現在の計算で使用している値から取得
                     original_rear_offset = self.current_best_rear_offset
-                    # X方向の誤差を相殺するように後ろオフセットを調整
+                    # X方向の誤差を相残するように後オフセットを調整
                     # 誤差とは逆方向に調整する必要があるので減算を使用
                     adjusted_rear_offset = original_rear_offset - best_x_diff
                     best_rear_offset = adjusted_rear_offset
-                    print(f"後ろオフセット距離を調整: {original_rear_offset:.2f}mm → {best_rear_offset:.2f}mm (X誤差: {best_x_diff:.2f}mm)")
+                    
+                    # 表示用の後オフセット値を計算
+                    display_offset = 45.0 if self.robot_size == "ハーフ" else 90.0
+                    display_original_offset = original_rear_offset - display_offset
+                    display_best_offset = best_rear_offset - display_offset
+                    
+                    # 内部値と表示用値の両方を表示
+                    print(f"後オフセット距離を調整: {original_rear_offset:.2f}mm → {best_rear_offset:.2f}mm (X誤差: {best_x_diff:.2f}mm)")
+                    print(f"表示用後オフセット距離: {display_original_offset:.2f}mm → {display_best_offset:.2f}mm (内部値から{display_offset:.1f}mm差し引き)")
                     
                     # 調整後の後ろオフセットで軌道を再計算して表示
                     final_plot_x_end, final_plot_y_end = self.plot_trajectory(best_acc_deg, best_rear_offset)
@@ -1588,16 +1606,30 @@ class TurnTunerApp:
                 
                 # GUIに最適化後の値を安全に表示
                 try:
+                    # 角加速度の表示更新
                     self.opt_acc_label.config(text=f"{best_acc_deg:.2f}")
-                    self.opt_ang_vel_label.config(text=f"{max_w_deg:.2f}")
-                    self.opt_rear_offset_label.config(text=f"{best_rear_offset:.2f}")
+                    
+                    # 角速度の表示更新
+                    best_max_w_rad, best_max_w_deg = compute_max_angular_velocity(self.turning_angle_deg, best_acc_deg)
+                    self.opt_ang_vel_label.config(text=f"{best_max_w_deg:.2f}")
+                    
+                    # 後オフセットの表示更新（内部計算値はそのまま、表示値のみ調整）
+                    display_offset = 45.0 if self.robot_size == "ハーフ" else 90.0
+                    display_best_rear_offset = best_rear_offset - display_offset if "90deg" in self.turn_type else best_rear_offset
+                    self.opt_rear_offset_label.config(text=f"{display_best_rear_offset:.2f}")
                     self.opt_y_error_label.config(text=f"{best_error:.2f}")
-                    print(f"\n結果表示成功: 角加速度={best_acc_deg:.2f}, 最大角速度={max_w_deg:.2f}, 後オフセット={best_rear_offset:.2f}, {target_axis}誤差={best_error:.2f}")
+                    
+                    # コンソールにも結果を出力（内部値と表示値の両方）
+                    if "90deg" in self.turn_type:
+                        print(f"\n結果表示成功: 角加速度={best_acc_deg:.2f}, 最大角速度={best_max_w_deg:.2f}")
+                        print(f"後オフセット={best_rear_offset:.2f}mm（内部値）, {display_best_rear_offset:.2f}mm（表示値）, {target_axis}誤差={best_error:.2f}mm")
+                    else:
+                        print(f"\n結果表示成功: 角加速度={best_acc_deg:.2f}, 最大角速度={best_max_w_deg:.2f}, 後オフセット={best_rear_offset:.2f}mm, {target_axis}誤差={best_error:.2f}mm")
                 except Exception as format_err:
                     print(f"\n値の表示中にエラーが発生しました: {format_err}")
                     # エラー発生時も安全に表示
                     self.opt_acc_label.config(text=str(best_acc_deg))
-                    self.opt_ang_vel_label.config(text=str(max_w_deg))
+                    self.opt_ang_vel_label.config(text=str(best_max_w_deg))
                     self.opt_rear_offset_label.config(text=str(best_rear_offset))
                     self.opt_y_error_label.config(text=str(best_error))
                 
