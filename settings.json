@@ -8,15 +8,15 @@
         }
     },
     "current_selection": {
-        "robot_size": "ハーフ",
-        "turn_type": "45deg入り"
+        "robot_size": "クラシック",
+        "turn_type": "大回り180deg"
     },
     "parameters": {
         "velocity": 400.0,
-        "front_offset": 0.0,
+        "front_offset": 10.0,
         "slip_coefficient": 1.2,
         "target_error": 0.5,
-        "acc_step": 10.0,
+        "acc_step": 50.0,
         "precision": 9.30232558139535
     }
 }
